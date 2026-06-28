@@ -588,3 +588,33 @@ genset:
     description: "s"
     format: "{} s"
     default: 0
+  # AC output measurement. hypnos populates these ONLY while the generator is running,
+  # copied from the shore-inlet meter (patroclus01:grid_shore) - that meter reads the
+  # generator's output whenever the generator is the live source. Split-phase 120/240
+  # (L1+L2 only; no L3). Values are real floats over MQTT - the per-phase scale factors
+  # in the ModBus-TCP register map are a TCP-only representation, not used here.
+  # Path shape per com.victronenergy.genset (venus wiki dbus + dbus_modbustcp).
+  Ac/Power: # Total real power, all phases
+    description: "W"
+    format: "{} W"
+  Ac/Frequency:
+    description: "Hz"
+    format: "{} Hz"
+  Ac/L1/Voltage:
+    description: "V AC"
+    format: "{} V"
+  Ac/L1/Current:
+    description: "A AC"
+    format: "{} A"
+  Ac/L1/Power:
+    description: "W"
+    format: "{} W"
+  Ac/L2/Voltage:
+    description: "V AC"
+    format: "{} V"
+  Ac/L2/Current:
+    description: "A AC"
+    format: "{} A"
+  Ac/L2/Power:
+    description: "W"
+    format: "{} W"
