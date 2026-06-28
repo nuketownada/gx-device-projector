@@ -564,3 +564,27 @@ vebus:
     description: "L3 inverter overload alarm"
   Alarms/L3/Ripple:
     description: "L3 high DC ripple alarm"
+# Added by Ada 2026-06-21 for the hypnos generator controller: a virtual GENSET
+# CONTROLLER. The GX generator start/stop module binds it, WRITES /Start to command
+# it, and reads /StatusCode (1..9 => running). hypnos reads /Start via N/. See the
+# hypnos repo tools/ dir. freakent re-reads this file per registration, so no
+# driver restart is needed.
+genset:
+  ProductId:
+    default: 65535
+  CustomName:
+    default: "Hypnos Generator"
+    persist: true
+  RemoteStartModeEnabled:
+    description: "1 = remote start/stop available (required for the GX to bind this genset)"
+    default: 1
+  Start:
+    description: "WRITTEN BY THE GX: 1=start 0=stop; hypnos reads via N/.../genset/<inst>/Start"
+    default: 0
+  StatusCode:
+    description: "0=Standby 1-7=Startup 8=Running 9=Stopping 10=Error (genset.py: 1..9 => running)"
+    default: 0
+  Engine/OperatingHours:
+    description: "s"
+    format: "{} s"
+    default: 0
