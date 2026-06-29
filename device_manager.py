@@ -59,14 +59,26 @@ class MQTTDeviceManager(MqttGObjectBridge):
         MqttGObjectBridge._on_message(self, client, userdata, msg)
 
         if MQTT.topic_matches_sub("device/+/Status", msg.topic):
+            if not msg.payload:
+                # Retained registration record cleared (zero-length retained publish).
+                # This is the only signal that the device's source record has gone
+                # away, so fully unregister it from the dbus here.
+                clientId = msg.topic.split("/")[1]
+                logging.info("Empty status received for client %s, removing device", clientId)
+                self._remove_device({"clientId": clientId})
+                return
+
             status = json.loads(msg.payload)
             logging.info("Received device status message %s", status)
-            
+
             if self._status_is_valid(status):
                 if status['connected'] == 1:
                     self._process_device(status)
                 elif status['connected'] == 0:
-                    self._remove_device(status)
+                    # Don't delete the device - keep it registered and just flip its
+                    # services' /Connected to 0. The device only goes away when its
+                    # retained Status record is cleared (empty payload, above).
+                    self._mark_disconnected(status)
                 else:
                     logging.warning("Unrecognised device Connected status %s for client %s", status.get("connected", "unknown"), status.get("clientId"))
             else:
@@ -84,10 +96,11 @@ class MQTTDeviceManager(MqttGObjectBridge):
             clientId = self._lwt[msg.topic].get("clientId")
             lwt_payload = msg.payload.decode("utf-8")
             if lwt_payload == lwt_value:
-                logging.debug("Message payload and LWT Value match so removing device %s, device has been disconnected", lwt_payload, lwt_value, clientId)
-                # this is a last will message, remove the device
+                logging.debug("Message payload and LWT Value match so marking device %s disconnected, device has been disconnected", lwt_payload, lwt_value, clientId)
+                # this is a last will message; mark the device disconnected (keep it
+                # registered with /Connected=0) rather than removing it.
                 status = {"clientId": clientId, "connected": 0}
-                self._remove_device(status)
+                self._mark_disconnected(status)
                 self._lwt[msg.topic] = None
                 del self._lwt[msg.topic]
                 self._client.unsubscribe(msg.topic)
@@ -182,8 +195,12 @@ class MQTTDeviceManager(MqttGObjectBridge):
         if device is None:
             # create a new device
             self._devices[clientId] = device = MQTTDevice(device_mgr=self, device_status=status)
+        else:
+            # device already registered (e.g. reconnect after a connected=0); just
+            # mark its services connected again rather than rebuilding the service.
+            device.set_connected(True)
 
-        if status.get("lwt_topic") is not None:   
+        if status.get("lwt_topic") is not None:
             # subscribe to the last will topic
             self._lwt[status.get("lwt_topic")] = { "clientId": clientId, "lwt_value": status.get("lwt_value", "false") }
             self._subscribe_to_lwt_topic(clientId, status.get("lwt_topic"))
@@ -193,6 +210,16 @@ class MQTTDeviceManager(MqttGObjectBridge):
         res = mqtt.publish(topic, json.dumps( build_dbus_payload(self.portalId, device.services) ) )
 
         logging.info('publish %s to %s, status is %s', build_dbus_payload(self.portalId, device.services), topic, res.rc)
+
+
+    def _mark_disconnected(self, status):
+        clientId = status["clientId"] # the device's client id
+        device = self._devices.get(clientId)
+        if device is not None:
+            device.set_connected(False)
+            logging.info('Device %s marked disconnected (kept registered, /Connected=0)', clientId)
+        else:
+            logging.warning('tried to mark device %s disconnected but it is not registered', clientId)
 
 
     def _remove_device(self, status):

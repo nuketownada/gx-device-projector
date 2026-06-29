@@ -41,6 +41,12 @@ class MQTTDevice(object):
             del self.services
 
 
+    def set_connected(self, connected):
+        if hasattr(self, 'services'):
+            for serviceId in self.services:
+                self.services[serviceId].set_connected(connected)
+
+
     def dbus_conn(self):
         return self.device_mgr.dbus_conn
         

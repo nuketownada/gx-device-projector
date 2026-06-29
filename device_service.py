@@ -59,6 +59,17 @@ class MQTTDeviceService(object):
         logging.info("Unregistered %s from dbus", self.serviceName())
 
 
+    def set_connected(self, connected):
+        # Toggle the dbus /Connected path in place instead of tearing the service
+        # down. Lets a device's LWT (connected=0) mark the service offline while
+        # keeping it registered, so GX software that expects the device to persist
+        # keeps working. The service is only removed when its retained registration
+        # record is cleared (see MQTTDeviceManager._remove_device).
+        if hasattr(self, '_dbus_service'):
+            self._dbus_service['/Connected'] = 1 if connected else 0
+            logging.info("Set %s /Connected to %s", self.serviceName(), 1 if connected else 0)
+
+
     def _set_up_local_settings(self):
         #local_settings = {
          #   'CustomName': ["/Settings/MqttDevices/{}/CustomName".format(self.serviceName()), 'My {} Sensor'.format(self.serviceType.capitalize()), 0, 0],
