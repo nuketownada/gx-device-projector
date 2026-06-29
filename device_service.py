@@ -68,6 +68,28 @@ class MQTTDeviceService(object):
         if hasattr(self, '_dbus_service'):
             self._dbus_service['/Connected'] = 1 if connected else 0
             logging.info("Set %s /Connected to %s", self.serviceName(), 1 if connected else 0)
+            if not connected:
+                self._invalidate_values()
+
+
+    def _invalidate_values(self):
+        # On disconnect, clear the live measurement paths to invalid (None). dbus holds
+        # the last value indefinitely, and consumers like dbus-systemcalc-py ignore
+        # /Connected when summing meters - so a stale value would keep being counted
+        # (e.g. a disconnected grid meter freezing the GX's AC Consumption). The device
+        # repopulates its values when it reconnects. Settings/persisted paths (and the
+        # /Mgmt, /DeviceInstance, /ProductName etc. metadata added separately) are left
+        # untouched, so the device stays identifiable while offline.
+        if not hasattr(self, '_dbus_service'):
+            return
+        for k, v in self._config.dbus_paths():
+            if v.get('persist', False) == True or v.get('setting', False) == True:
+                continue
+            path = "/" + k
+            try:
+                self._dbus_service[path] = None
+            except Exception as e:
+                logging.warning("Could not invalidate %s %s: %s", self.serviceName(), path, e)
 
 
     def _set_up_local_settings(self):
