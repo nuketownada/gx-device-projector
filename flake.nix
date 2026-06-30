@@ -22,7 +22,7 @@
       ]);
     in {
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ py pkgs.dbus pkgs.glib ];
+        packages = [ py pkgs.dbus pkgs.glib pkgs.mosquitto ];
         shellHook = ''
           # velib_python (vedbus.py, settingsdevice.py, ve_utils.py, logger.py) on the path,
           # mirroring the GX layout where the code expects ext/velib_python.
