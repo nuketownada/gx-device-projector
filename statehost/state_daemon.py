@@ -187,14 +187,15 @@ class StateHost(dbus.service.Object):
     def __init__(self, bus, make_bus):
         self._bus = bus
         self._make_bus = make_bus  # () -> a fresh private connection for a hosted service
-        self._busname = dbus.service.BusName(CONTROL_BUS_NAME, bus, do_not_queue=True)
-        super().__init__(self._busname, CONTROL_PATH)
         # In-memory incarnation cookie: new per process, stable for its life -> changes
         # iff this daemon lost its state. The logic daemon mirrors it to MQTT (retained)
         # so boards re-announce on a change. (Nonce, not counter: boards only test
-        # "different from last".)
+        # "different from last".) Set BEFORE claiming the name, so a GetCookie racing the
+        # NameOwnerChanged can't arrive before the attribute exists.
         self.cookie = uuid.uuid4().hex
         self.services = {}  # service_id -> HostedService
+        self._busname = dbus.service.BusName(CONTROL_BUS_NAME, bus, do_not_queue=True)
+        super().__init__(self._busname, CONTROL_PATH)
         logging.info("state host up on %s, cookie=%s", CONTROL_BUS_NAME, self.cookie)
         self.Started(self.cookie)
 
