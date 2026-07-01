@@ -20,12 +20,14 @@ import threading
 
 import paho.mqtt.client as mqtt
 
-# Ownership partition mirrored per profile. `full` = the bench (vebus fully board-authored
-# incl. /Mode; genset omits GX-owned /Start). `temp` = a harmless device for the live-GX
-# integration test (a phantom vebus could perturb ESS/DVCC; a temperature sensor cannot).
+# Ownership partition mirrored per profile (docs section 6.3). `full` = the bench: the vebus
+# board authors actual status in /State + identity, and OMITS the GX-owned /Mode from init
+# (invbus seeds it once from hardware over W/); the genset omits GX-owned /Start. `temp` = a
+# harmless device for the live-GX integration test (a phantom vebus could perturb ESS/DVCC; a
+# temperature sensor cannot).
 PROFILES = {
     "full": {
-        "v1": {"type": "vebus", "init": {"/Mode": 3, "/ModeIsAdjustable": 1, "/State": 9,
+        "v1": {"type": "vebus", "init": {"/ModeIsAdjustable": 1, "/State": 9,
                                          "/Dc/0/Voltage": 13.5, "/Dc/0/Current": -22.0}},
         "g1": {"type": "genset", "init": {"/RemoteStartModeEnabled": 1, "/StatusCode": 8}},
     },

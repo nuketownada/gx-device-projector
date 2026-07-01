@@ -71,21 +71,32 @@ class ProjectionClient:
     def watch_host(self, on_up, on_down=None):
         """Fire on_up(cookie) when the host's control name (re)appears, on_down() when it
         vanishes. The caller reconciles + (re)publishes the cookie in on_up."""
+        def _up():
+            self._iface = None  # new owner -> drop the cached proxy
+            try:
+                on_up(self.get_cookie())
+            except Exception:
+                logging.exception("watch_host on_up failed")
+
+        def _down():
+            self._iface = None
+            if on_down:
+                try:
+                    on_down()
+                except Exception:
+                    logging.exception("watch_host on_down failed")
+
         def handler(name, old, new):
             old, new = str(old), str(new)
             if new and not old:
-                self._iface = None  # new owner -> drop the cached proxy
-                try:
-                    on_up(self.get_cookie())
-                except Exception:
-                    logging.exception("watch_host on_up failed")
+                _up()
             elif old and not new:
-                self._iface = None
-                if on_down:
-                    try:
-                        on_down()
-                    except Exception:
-                        logging.exception("watch_host on_down failed")
+                _down()
+            elif old and new:
+                # Atomic owner replacement (near-impossible with do_not_queue, but the entire
+                # resync protocol hangs on this signal, so handle it): treat as down then up.
+                _down()
+                _up()
 
         self._bus.add_signal_receiver(
             handler,

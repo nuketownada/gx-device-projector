@@ -18,7 +18,10 @@ CONTROL_IFACE = "com.hypnos.DbusState1"
 CONTROL_PATH = "/"
 
 # Bench services mirror the real ownership partition (docs section 6.3):
-#  - vebus (inverter): fully board-authored, incl. /Mode (actual on/off).
+#  - vebus (inverter): board authors actual status in /State + identity; /Mode is the
+#    GX-OWNED switch position, OMITTED from init (invbus seeds it once from hardware over
+#    W/ -- a flashmq path the mosquitto bench has no bridge for, so here /Mode stays None,
+#    which is exactly how /Start behaves for the genset).
 #  - genset: board authors RemoteStartModeEnabled + StatusCode; OMITS /Start (GX-owned).
 BENCH_SERVICES = [
     {
@@ -28,13 +31,14 @@ BENCH_SERVICES = [
         "ProductName": "Bench Magnum",
         "FirmwareVersion": "3.7",
         "paths": {
-            "/Mode": {"writeable": True, "description": "1=ChgOnly 2=InvOnly 3=On 4=Off"},
+            "/Mode": {"writeable": True, "gx_owned": True, "description": "1=ChgOnly 2=InvOnly 3=On 4=Off (GX-owned switch position)"},
             "/ModeIsAdjustable": {},
             "/State": {},
             "/Dc/0/Voltage": {"format": "{:.2f} V"},
             "/Dc/0/Current": {"format": "{:.1f} A"},
         },
-        "init": {"/Mode": 3, "/ModeIsAdjustable": 1, "/State": 9,
+        # NOTE: no /Mode -- GX-owned, seeded from actual over W/ on the real GX; None here.
+        "init": {"/ModeIsAdjustable": 1, "/State": 9,
                  "/Dc/0/Voltage": 13.5, "/Dc/0/Current": -22.0},
     },
     {

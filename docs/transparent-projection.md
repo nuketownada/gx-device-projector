@@ -191,6 +191,10 @@ own view match the state daemon's reality. This is what delivers zero-blip on de
 | `EnsureService` re-applies `init` to a live service → stomps state / fights a command | `init` is applied **only on creation**. On an existing service `EnsureService` ignores `init` entirely. |
 | New instance allocated on re-announce → GX sees a "new device" | Instance comes from localsettings keyed by `service_id`; stable across everything. |
 | Board announces while state daemon transiently down | Logic retries `EnsureService` until the daemon is up. (Cookie is published only *after* the daemon is up, so cookie-driven announces already arrive late; this covers an independent board reconnect.) |
+| A board's `connected:0` will fires on **every** ungraceful rust-mqtt drop (incl. its own reg-timeout retry) → invalidating a live board's values on a transient flap | Logic **debounces** disconnect: arm a `DISCONNECT_GRACE_S` timer on a will/`connected:0`, cancel it on re-announce, commit only if it elapses. A flap = zero dbus change; a real death commits after the window. |
+| GX-owned intent (`/Start`, `/Mode`) erased by the disconnect invalidation on every flap | Mark those paths `gx_owned`; `SetConnected(false)` exempts them (their value is standing GX intent, not board telemetry to expire). |
+
+**Known open hole (liveness).** The debounce timer is **in-memory**, so two sequences still strand a dead board at `/Connected=1` forever: (a) the will fires while logic is *down* (pre-existing — non-retained, nobody listening), and (b) the will fires, the grace is armed, and *logic restarts during the window* (the timer is lost; `reconcile` has no liveness input — `ListServices` doesn't carry `connected`, and nothing retained records the drop). The durable fix is a **retained `device/<id>/online`** last-will (retained `0`, board publishes retained `1` on connect): every logic incarnation gets the current truth on subscribe, which is exactly what `reconcile` is missing. Tracked as its own (firmware-touching) change; until it lands this is a documented hole, not a forgotten one.
 
 ### 5.3 Restart taxonomy
 
@@ -199,7 +203,8 @@ own view match the state daemon's reality. This is what delivers zero-blip on de
 | **Logic deploy/crash** | untouched | unchanged | none | **zero blip** (adopt) |
 | **State-daemon crash** | new, empty | **changes** | re-announce | total loss → rebuilt from board init (§7); accepted |
 | **GX reboot** | new, empty | changes | reconnect→announce | total loss; boards re-announce on MQTT reconnect (cookie redundant) |
-| **Board restart** | untouched | unchanged | LWT → `/Connected=0`; on return, announce | board's own device flaps disconnected/connected; others untouched |
+| **Board restart (fast, < grace)** | untouched | unchanged | will fires → logic arms grace; board boots, re-announces (confirmed init) → cancels | **zero dbus change** — the will is debounced (§5.2) and the re-announce carries a confirmed `StatusCode`, so a running genset never flaps. |
+| **Board restart (slow, > grace)** | untouched | unchanged | will fires; grace elapses → `/Connected=0`; on return, announce | board's own device flaps disconnected/connected; others untouched |
 
 ---
 
@@ -230,7 +235,7 @@ Publish **non-retained**, carrying init values per service:
   "services": {
     "v1": {
       "type": "vebus",
-      "init": { "Mode": 3, "ModeIsAdjustable": 1, "CustomName": "Magnum Inverter" }
+      "init": { "ModeIsAdjustable": 1, "CustomName": "Magnum Inverter" }
     }
   }
 }
@@ -248,8 +253,10 @@ Publish **non-retained**, carrying init values per service:
 
 | Service | Board includes in `init` | Board omits (→ `None`, GX-owned) |
 |---|---|---|
-| `vebus` (inverter) | `Mode` (actual on/off), `ModeIsAdjustable`, `CustomName`, identity | — (fully board-recoverable) |
+| `vebus` (inverter) | `State` (actual status), `ModeIsAdjustable`, `CustomName`, identity | `Mode` (GX-owned switch position; the board seeds it **once** from the inverter's actual on/off over `W/`, then honours GX writes — never in `init`) |
 | `genset` | `RemoteStartModeEnabled=1`, `StatusCode`, `CustomName`, identity | `Start` (GX scheduler intent) |
+
+`/Mode` vs `/State` is the Victron split: `/State` is the actual operational state (board-authored telemetry), `/Mode` is the desired switch position (GX-owned command). The board keeps `/Mode` out of `init` so a projector restart can't re-assert a stale switch position over a live GX command; the one-shot seed-from-actual exists only so the GX UI reflects a physically-off inverter on adoption.
 
 ### 6.4 Instance stability
 

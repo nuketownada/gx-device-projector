@@ -30,7 +30,7 @@ sleep 0.3
 echo "--- state daemon + logicd + board ---"
 $PY statehost/state_daemon.py & DAEMON=$!
 wait_name com.hypnos.dbusstate || { echo "no state host"; exit 1; }
-$PY statehost/logicd.py --mqtt-port $PORT --portal benchportal & LOGICD=$!
+$PY statehost/logicd.py --mqtt-port $PORT --portal benchportal --disconnect-grace 3 & LOGICD=$!
 sleep 0.6
 $PY statehost/board_stub.py --mqtt-port $PORT --client-id benchboard --log "$BLOG" & BOARD=$!
 
@@ -47,7 +47,7 @@ echo "--- LOGIC RESTART (reconcile; board must NOT re-announce) ---"
 : > "${BLOG}"   # truncate to observe only post-restart board activity
 kill -TERM "$LOGICD"; wait "$LOGICD" 2>/dev/null
 sleep 0.4
-$PY statehost/logicd.py --mqtt-port $PORT --portal benchportal & LOGICD=$!
+$PY statehost/logicd.py --mqtt-port $PORT --portal benchportal --disconnect-grace 3 & LOGICD=$!
 sleep 1.2
 cp "$NOC" "${NOC}.afterlogic"
 BOARD_AFTER_LOGIC="$(cat "$BLOG")"
@@ -66,16 +66,27 @@ HC2="$(hostcookie)"
 VINV3="$(getsvc mqtt_benchboard_v1)"
 BOARD_AFTER_STATE="$(cat "$BLOG")"
 
-echo "--- LWT (ungraceful board drop -> Connected=0 via will) ---"
+echo "--- LWT FLAP (drop + re-announce within grace -> ZERO change, stays Connected) ---"
+# The connected:0 will fires on the ungraceful drop, but logicd DEBOUNCES it (--disconnect-grace
+# 3). A board that re-announces within the window must produce zero dbus change -- no
+# Connected=0, no value invalidation. This is the section-1 fix: board MQTT flaps (frequent,
+# uncontrolled) no longer blip the genset/meter chain the way freakent restarts used to.
 kill -KILL "$BOARD"; BOARD=""
-sleep 1.3   # broker detects the dropped socket, fires the will, logicd sets Connected=0
+sleep 0.5   # let the broker fire the will + logicd arm the grace timer
+$PY statehost/board_stub.py --mqtt-port $PORT --client-id benchboard --log "$BLOG" & BOARD=$!
+sleep 1.5   # reconnect + re-announce, still well within the 3s grace -> cancels the pending disc
+VINV_FLAP="$(getsvc mqtt_benchboard_v1)"
+
+echo "--- LWT SUSTAINED death (drop, no re-announce -> commit Connected=0 after grace) ---"
+kill -KILL "$BOARD"; BOARD=""
+sleep 4.5   # > grace (3s): will fires, grace elapses with no re-announce -> commit disconnect
 VINV4="$(getsvc mqtt_benchboard_v1)"
 
 echo "--- assertions ---"
 $PY - "${NOC}.afterlogic" "${BLOG}.afterreg" "$VINV1" "$VGEN1" "$VINV2" "$VINV3" \
-      "$HC1" "$HC2" "$BOARD_AFTER_LOGIC" "$BOARD_AFTER_STATE" "$VINV4" <<'PYEOF'
+      "$HC1" "$HC2" "$BOARD_AFTER_LOGIC" "$BOARD_AFTER_STATE" "$VINV4" "$VINV_FLAP" <<'PYEOF'
 import sys, json
-noc, blog_reg, vinv1, vgen1, vinv2, vinv3, hc1, hc2, after_logic, after_state, vinv4 = sys.argv[1:12]
+noc, blog_reg, vinv1, vgen1, vinv2, vinv3, hc1, hc2, after_logic, after_state, vinv4, vinv_flap = sys.argv[1:13]
 def jl(s): return [json.loads(l) for l in s.splitlines() if l.strip()]
 def jlf(p): return [json.loads(l) for l in open(p) if l.strip()]
 noc_ev = jlf(noc)
@@ -91,7 +102,11 @@ def check(c,m):
     print(("PASS" if c else "FAIL")+": "+m)
 
 # 1) registration: device populated from board init, /Start omitted
-check(INV1 and INV1["values"].get("/Mode")==3, "vebus /Mode=3 from board init")
+# /Mode is GX-OWNED, OMITTED from board init (invbus seeds it from actual over W/, a flashmq
+# path the mosquitto bench can't bridge), so it stays None here -- exactly like /Start on the
+# genset. Actual status rides in /State (board-authored). The seed path is the GX integration
+# test's job (it has flashmq).
+check(INV1 and INV1["values"].get("/Mode") is None, "vebus /Mode omitted from init (GX-owned)")
 check(INV1["values"].get("/State")==9, "vebus /State=9 from board init")
 check(GEN1["values"].get("/StatusCode")==8, "genset /StatusCode=8 from board init")
 check(GEN1["values"].get("/Start", "X") is None, "genset /Start invalid (board omitted)")
@@ -114,12 +129,21 @@ check(INV2==INV1, "vebus values unchanged across logic restart")
 check(hc2 and hc2!=hc1, "host cookie flipped across state-daemon restart")
 check(any(e["t"]=="cookie_change" for e in as_), "board saw cookie_change")
 check(any(e["t"]=="reannounce" for e in as_), "board re-announced after the flip")
-check(INV3 and INV3["values"].get("/Mode")==3, "device rebuilt with board init (/Mode=3)")
+check(INV3 and INV3["values"].get("/State")==9, "device rebuilt with board init (/State=9, /Mode still omitted)")
 
-# 4) LWT: ungraceful board drop -> Connected=0 + live values invalidated
+# 4a) LWT FLAP: drop + re-announce within the grace -> debounced, ZERO change
+INV_FLAP=json.loads(vinv_flap)
+check(INV_FLAP and INV_FLAP.get("connected") is True,
+      "LWT flap: vebus STAYS Connected across a drop+re-announce within grace")
+check(INV_FLAP["values"].get("/State")==9,
+      "LWT flap: live value NOT invalidated (/State still 9)")
+
+# 4b) LWT SUSTAINED: drop with no re-announce -> commit Connected=0 + invalidate after grace
 INV4=json.loads(vinv4)
-check(INV4 and INV4.get("connected") is False, "LWT: vebus Connected=0 after ungraceful board drop")
-check(INV4["values"].get("/State") is None, "LWT: live value invalidated (/State -> None)")
+check(INV4 and INV4.get("connected") is False,
+      "LWT sustained: vebus Connected=0 after grace elapses")
+check(INV4["values"].get("/State") is None,
+      "LWT sustained: live value invalidated (/State -> None)")
 sys.exit(0 if ok else 1)
 PYEOF
 RC=$?; echo "--- e2e rc=$RC ---"; exit $RC
