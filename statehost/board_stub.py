@@ -57,6 +57,7 @@ class BoardStub:
         self.cookie_topic = "{}/_host/cookie".format(ns)
         self.lwt_topic = "{}/{}/LWT".format(ns, client_id)
         self.lwt_value = "offline"
+        self.online_topic = "{}/{}/online".format(ns, client_id)
 
         self.m = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="board_" + client_id)
         if ca_cert:
@@ -64,7 +65,11 @@ class BoardStub:
             self.m.tls_set(ca_cert, cert_reqs=ssl.CERT_REQUIRED)
         self.m.on_connect = self._on_connect
         self.m.on_message = self._on_message
-        self.m.will_set(self.lwt_topic, self.lwt_value, retain=False)
+        # Retained liveness will: an ungraceful drop leaves a RETAINED online=0 on the broker,
+        # so a logicd that was down when we died still learns of it the instant it subscribes.
+        # (A new-firmware board carries exactly one will -- this one; logicd keeps the old
+        # LWT/Status connected:0 handling for un-migrated boards, so there's no flag day.)
+        self.m.will_set(self.online_topic, "0", retain=True)
         self.m.connect(host, port, 60)
         self.m.loop_start()  # background thread is fine -- the stub touches no dbus
 
@@ -74,6 +79,10 @@ class BoardStub:
     def _on_connect(self, c, u, flags, rc, props=None):
         c.subscribe(self.dbus_topic)
         c.subscribe(self.cookie_topic)
+        # Assert liveness (retained online=1) BEFORE announcing, so the ordering invariant is
+        # simply "online precedes registration" -- and it overwrites any stale retained 0.
+        self.m.publish(self.online_topic, "1", retain=True)
+        self._emit("online")
         self._announce()
 
     def _announce(self):

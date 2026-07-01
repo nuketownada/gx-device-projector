@@ -317,7 +317,8 @@ class StateHost(dbus.service.Object):
     @dbus.service.method(CONTROL_IFACE, in_signature="", out_signature="s")
     def ListServices(self):
         return json.dumps([
-            {"service_id": hs.service_id, "type": hs.type, "instance": hs.instance, "meta": hs.meta}
+            {"service_id": hs.service_id, "type": hs.type, "instance": hs.instance,
+             "connected": hs.connected, "meta": hs.meta}
             for hs in self.services.values()
         ])
 
