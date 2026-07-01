@@ -62,6 +62,7 @@ class V2LogicDaemon:
         self.ns = ns
         self.status_sub = "{}/+/Status".format(ns)
         self.proxy_sub = "{}/+/Proxy".format(ns)
+        self.online_sub = "{}/+/online".format(ns)   # retained liveness (the durable will)
         self.cookie_topic = "{}/_host/cookie".format(ns)
 
         self.proj.watch_host(self._on_host_up, self._on_host_down)
@@ -163,6 +164,7 @@ class V2LogicDaemon:
         logging.info("[mqtt] connected rc=%s", reason_code)
         client.subscribe(self.status_sub)
         client.subscribe(self.proxy_sub)  # value-relay clients (patroclus, tanks)
+        client.subscribe(self.online_sub)  # retained liveness -> delivers the current truth now
         self._flush()  # push the SUBSCRIBEs out before any board announces
         # Reconcile now if the host is already up: adopt devices, rebuild LWT subs, and
         # publish the current cookie. (watch_host handles a host restart while we're up.)
@@ -193,6 +195,8 @@ class V2LogicDaemon:
                 self._disconnect(client_id)
         elif len(parts) == 3 and parts[0] == self.ns and parts[2] == "Proxy":
             self._handle_proxy(msg.payload)
+        elif len(parts) == 3 and parts[0] == self.ns and parts[2] == "online":
+            self._handle_online(parts[1], msg.payload)
         elif msg.topic in self._lwt:
             client_id, lwt_value = self._lwt[msg.topic]
             if msg.payload.decode("utf-8", "ignore") == lwt_value:
@@ -339,6 +343,23 @@ class V2LogicDaemon:
         if t is not None:
             GLib.source_remove(t)
             logging.info("[reg] %s alive -> cancelled pending disconnect", client_id)
+
+    def _handle_online(self, client_id, payload):
+        # Retained liveness (<ns>/<id>/online): the DURABLE complement to the non-retained will.
+        # Because it's retained, every logicd incarnation gets the current truth the instant it
+        # subscribes -- closing the stuck-Connected=1 hole where a will fired while logicd was
+        # down/restarting and was lost (reconcile has no liveness input; ListServices carries no
+        # live truth of its own). SINGLE-WRITER rule: online NEVER sets Connected=1 -- that comes
+        # exclusively from a processed registration (which applies init FIRST, preserving the
+        # ordering fix). It has exactly two effects, both routed through the existing debounce:
+        #   "1" -> the board is alive: cancel any armed disconnect.
+        #   "0" -> arm the SAME grace timer the will uses (a mid-flap "0" is absorbed identically;
+        #          an hour-old retained "0" is an hour-late commit either way, 15s more is nothing).
+        val = payload.decode("utf-8", "ignore").strip()
+        if val == "1":
+            self._cancel_pending_disc(client_id)
+        elif val == "0":
+            self._disconnect(client_id)
 
     def _remove(self, client_id):
         self._cancel_pending_disc(client_id)  # explicit removal supersedes any pending disc
