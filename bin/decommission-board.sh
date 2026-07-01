@@ -28,15 +28,27 @@ set -eu
 CID=${1:?usage: decommission-board.sh <client_id> [broker_host]   (e.g. hypnosgen)}
 HOST=${2:-127.0.0.1}
 
+# Credentials (optional): set MQTT_USER + MQTT_PASSWORD for an authenticated connection.
+AUTH=""
+[ -n "${MQTT_USER:-}" ] && AUTH="-u ${MQTT_USER} -P ${MQTT_PASSWORD:-}"
+
+# ACL CANARY: the verify reads below rely on being able to READ device/#. An ACL-denied
+# subscribe is SILENT in MQTT (empty, not an error), so a failed clear would look like success
+# -- and anonymous localhost IS ACL-blind to device/# on the Victron broker. Prove we can read
+# device/# via a topic guaranteed retained + present (logicd republishes device/_host/cookie on
+# every startup); abort loudly if it comes back empty.
+CANARY=$(mosquitto_sub -h "$HOST" $AUTH -t "device/_host/cookie" -C 1 -W 3 2>/dev/null || true)
+[ -n "$CANARY" ] || { echo "ERROR: cannot read device/_host/cookie on ${HOST} -- ACL-denied (set MQTT_USER/MQTT_PASSWORD) or broker down. Refusing to decide blind." >&2; exit 1; }
+
 for TOPIC in "device/${CID}/online" "device/${CID}/Status"; do
   echo "Clearing retained topic on ${HOST}: ${TOPIC}"
-  mosquitto_pub -h "$HOST" -r -t "$TOPIC" -m ""
+  mosquitto_pub -h "$HOST" $AUTH -r -t "$TOPIC" -m ""
 done
 
 # Verify both are gone (a surviving retained message is delivered within ~1s of subscribing).
 FAIL=0
 for TOPIC in "device/${CID}/online" "device/${CID}/Status"; do
-  LEFT=$(mosquitto_sub -h "$HOST" -t "$TOPIC" -W 2 2>/dev/null || true)
+  LEFT=$(mosquitto_sub -h "$HOST" $AUTH -t "$TOPIC" -W 2 2>/dev/null || true)
   if [ -n "$LEFT" ]; then
     echo "WARNING: ${TOPIC} still has a retained message: $LEFT" >&2
     FAIL=1

@@ -77,6 +77,24 @@ sleep 1.5
 CONN_BACK="$(getconn)"; STATE_BACK="$(getstate)"
 echo "after re-announce: connected=$CONN_BACK statuscode=$STATE_BACK"
 
+echo "--- STALE TAKEOVER-WILL: a late retained 0 on a LIVE board must self-heal to 1 ---"
+# FlashMQ fires the OLD connection's retained will cross-thread on session takeover --
+# unordered vs the new connection's online=1, and deferrable to the keepalive reaper
+# (~1.5x keepalive) when the dead socket's buffers are full. Simulate the late will
+# landing on the live board's topic; the board's own-topic subscription must re-assert 1.
+mosquitto_pub -p $PORT -r -t device/livebench/online -m 0
+sleep 1.0
+RETAINED_NOW="$(timeout 3 mosquitto_sub -p $PORT -t device/livebench/online -C 1 2>/dev/null)"
+echo "retained after stale 0 + heal window: $RETAINED_NOW"
+
+# and the projector consequence the race actually threatens: a LATER logicd restart reading
+# the retained store must NOT falsely disconnect the live board.
+kill -TERM $LOGICD 2>/dev/null; wait $LOGICD 2>/dev/null
+$PY statehost/logicd.py --mqtt-port $PORT --portal livebench --disconnect-grace $GRACE & LOGICD=$!
+sleep $((GRACE + 3))
+CONN_HEALED="$(getconn)"; STATE_HEALED="$(getstate)"
+echo "after logicd restart over healed topic: connected=$CONN_HEALED statuscode=$STATE_HEALED"
+
 echo "--- assertions ---"
 RC=0
 [ "$CONN_EARLY" = "True" ] && echo "PASS: adopted the stale Connected=1 on restart (grace not yet elapsed)" || { echo "FAIL: expected Connected=1 right after restart, got $CONN_EARLY"; RC=1; }
@@ -85,4 +103,6 @@ RC=0
 [ "$CONN_BARE" = "False" ] && echo "PASS: single-writer -- bare online=1 did NOT set Connected=1" || { echo "FAIL: online=1 resurrected the device without a registration (Connected=$CONN_BARE)"; RC=1; }
 [ "$STATE_BARE" = "None" ] && echo "PASS: single-writer -- values still invalidated after bare online=1" || { echo "FAIL: values changed on a bare online=1 (StatusCode=$STATE_BARE)"; RC=1; }
 [ "$CONN_BACK" = "True" ] && [ "$STATE_BACK" = "8" ] && echo "PASS: recovery via registration -- init reapplied, then Connected=1" || { echo "FAIL: recovery wrong (connected=$CONN_BACK statuscode=$STATE_BACK)"; RC=1; }
+[ "$RETAINED_NOW" = "1" ] && echo "PASS: stale takeover-will healed -- live board re-asserted retained online=1" || { echo "FAIL: retained online stuck at '$RETAINED_NOW' after stale 0 on a live board"; RC=1; }
+[ "$CONN_HEALED" = "True" ] && [ "$STATE_HEALED" = "8" ] && echo "PASS: logicd restart over the healed topic keeps the live board Connected=1" || { echo "FAIL: live board falsely disconnected by stale will (connected=$CONN_HEALED statuscode=$STATE_HEALED)"; RC=1; }
 echo "--- liveness rc=$RC ---"; exit $RC

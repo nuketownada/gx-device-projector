@@ -25,11 +25,22 @@ CID=${1:?usage: cutover-board-to-v2.sh <client_id> [broker_host]   (e.g. hypnosi
 HOST=${2:-127.0.0.1}
 TOPIC="device/${CID}/Status"
 
+# Credentials (optional): set MQTT_USER + MQTT_PASSWORD for an authenticated connection.
+AUTH=""
+[ -n "${MQTT_USER:-}" ] && AUTH="-u ${MQTT_USER} -P ${MQTT_PASSWORD:-}"
+
+# ACL CANARY: the verify read below is SILENT on an ACL-denied subscribe (anonymous localhost
+# is ACL-blind to device/# on the Victron broker), so a failed clear would look like success.
+# Prove we can read device/# via device/_host/cookie (logicd republishes it retained on every
+# startup) and abort loudly if empty.
+CANARY=$(mosquitto_sub -h "$HOST" $AUTH -t "device/_host/cookie" -C 1 -W 3 2>/dev/null || true)
+[ -n "$CANARY" ] || { echo "ERROR: cannot read device/_host/cookie on ${HOST} -- ACL-denied (set MQTT_USER/MQTT_PASSWORD) or broker down. Refusing to decide blind." >&2; exit 1; }
+
 echo "Clearing stale v1 retained registration on ${HOST}: ${TOPIC}"
-mosquitto_pub -h "$HOST" -r -t "$TOPIC" -m ""
+mosquitto_pub -h "$HOST" $AUTH -r -t "$TOPIC" -m ""
 
 # A retained message, if any survived, is delivered within ~1s of subscribing.
-LEFT=$(mosquitto_sub -h "$HOST" -t "$TOPIC" -W 2 2>/dev/null || true)
+LEFT=$(mosquitto_sub -h "$HOST" $AUTH -t "$TOPIC" -W 2 2>/dev/null || true)
 if [ -n "$LEFT" ]; then
   echo "WARNING: ${TOPIC} still has a retained message:" >&2
   echo "  $LEFT" >&2

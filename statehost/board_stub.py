@@ -83,6 +83,13 @@ class BoardStub:
         # simply "online precedes registration" -- and it overwrites any stale retained 0.
         self.m.publish(self.online_topic, "1", retain=True)
         self._emit("online")
+        # Subscribe our OWN online topic and re-assert on contradiction: FlashMQ fires the OLD
+        # connection's retained will (0) cross-thread on session takeover -- unordered vs our
+        # online=1 above, and deferrable to the keep-alive reaper (~1.5x keepalive) when the
+        # dead socket's buffers are full. A live board seeing 0 on its own topic republishes 1:
+        # level-triggered, so it heals a stale retained 0 from ANY source at ANY later time.
+        # (Firmware note: this subscribe must precede the cookie subscribe -- f547bdd rule.)
+        c.subscribe(self.online_topic)
         self._announce()
 
     def _announce(self):
@@ -104,6 +111,12 @@ class BoardStub:
                 self._emit("write", {"topic": wbase + path, "value": val})
 
     def _on_message(self, c, u, msg):
+        if msg.topic == self.online_topic:
+            if msg.payload.decode() == "0":
+                # stale takeover-will (or any other writer) contradicted a live board
+                self.m.publish(self.online_topic, "1", retain=True)
+                self._emit("online_reasserted")
+            return
         if msg.topic == self.dbus_topic:
             reply = json.loads(msg.payload)
             self._emit("dbus_reply", reply)
