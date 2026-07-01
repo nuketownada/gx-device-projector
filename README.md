@@ -1,4 +1,4 @@
-# dbus-mqtt-devices 0.9.0 — transparent-projection fork
+# gx-device-projector 0.9.0
 
 > ⚠️ **Hard fork** of [freakent/dbus-mqtt-devices](https://github.com/freakent/dbus-mqtt-devices), **diverged** from upstream. It keeps the MQTT self-registration idea but re-architects the driver as a **transparent state projector**: the edge device authors its own state and the driver projects it onto the dbus *without authoring anything itself* — no default values, no persisted values, no debounce. Full design in **[docs/transparent-projection.md](docs/transparent-projection.md)**.
 >
