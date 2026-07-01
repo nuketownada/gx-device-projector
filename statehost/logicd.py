@@ -70,10 +70,12 @@ class V2LogicDaemon:
         with open(path) as f:
             cfg = yaml.safe_load(f)
         shapes = {}
+        self._v1_defaults = {}  # type -> {path: services.yml default} (the v1 transition shim)
         for typ, paths in cfg.items():
             if not isinstance(paths, dict):
                 continue
             d = {}
+            defaults = {}
             for pk, meta in paths.items():
                 meta = meta or {}
                 d["/" + pk] = {
@@ -83,7 +85,10 @@ class V2LogicDaemon:
                     "setting": bool(meta.get("setting", False)),
                     "description": meta.get("description", ""),
                 }
+                if meta.get("default") is not None:
+                    defaults["/" + pk] = meta["default"]
             shapes[typ] = d
+            self._v1_defaults[typ] = defaults
         return shapes
 
     # -- MQTT via the GLib mainloop (single-threaded, like MqttGObjectBridge) --
@@ -157,10 +162,13 @@ class V2LogicDaemon:
             meta["lwt_value"] = lwt_value
         ensured = {}
         for tag, sdef in (status.get("services") or {}).items():
-            # Lenient: sdef may be "type" (string) or {type, init}. Not v1 dual-support,
-            # just tolerant parsing.
+            # sdef is "type" (v1) or {type, init} (v2).
             if isinstance(sdef, str):
-                typ, init = sdef, {}
+                # v1 client (no init): seed init from the services.yml defaults so it
+                # behaves exactly as under the old freakent. Transition shim only -- v2
+                # clients author their own init and get NO defaults (transparent projection).
+                typ = sdef
+                init = dict(self._v1_defaults.get(typ, {}))
             else:
                 typ, init = sdef.get("type"), (sdef.get("init") or {})
             shape = self.shapes.get(typ)
