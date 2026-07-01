@@ -39,17 +39,23 @@ COOKIE_TOPIC = "device/_host/cookie"
 
 class V2LogicDaemon:
     def __init__(self, bus, services_yml, portal_id,
-                 mqtt_host, mqtt_port, ca_cert=None, user=None, passwd=None):
+                 mqtt_host, mqtt_port, ca_cert=None, user=None, passwd=None, ns="device"):
         self.bus = bus
         self.portal_id = portal_id
         self.shapes = self._load_shapes(services_yml)   # type -> {abspath: meta}
         self.proj = ProjectionClient(bus)
         self.last_cookie = None
         self._lwt = {}                                  # lwt_topic -> (client_id, lwt_value)
+        # Registration namespace. Default "device" = production. A distinct ns (e.g.
+        # "hstest") isolates a GX integration test from the running freakent, which only
+        # listens on device/+/Status.
+        self.ns = ns
+        self.status_sub = "{}/+/Status".format(ns)
+        self.cookie_topic = "{}/_host/cookie".format(ns)
 
         self.proj.watch_host(self._on_host_up, self._on_host_down)
 
-        self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="dbus_state_logic")
+        self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="dbus_state_logic_" + ns)
         if user:
             self._mqtt.username_pw_set(user, passwd)
         if ca_cert:
@@ -104,7 +110,7 @@ class V2LogicDaemon:
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         logging.info("[mqtt] connected rc=%s", reason_code)
-        client.subscribe("device/+/Status")
+        client.subscribe(self.status_sub)
         self._flush()  # push the SUBSCRIBE out before any board announces
         # Reconcile now if the host is already up: adopt devices, rebuild LWT subs, and
         # publish the current cookie. (watch_host handles a host restart while we're up.)
@@ -122,7 +128,7 @@ class V2LogicDaemon:
     # -- registration handshake ----------------------------------------------
     def _handle(self, msg):
         parts = msg.topic.split("/")
-        if len(parts) == 3 and parts[0] == "device" and parts[2] == "Status":
+        if len(parts) == 3 and parts[0] == self.ns and parts[2] == "Status":
             client_id = parts[1]
             if not msg.payload:
                 self._remove(client_id)
@@ -194,7 +200,7 @@ class V2LogicDaemon:
                 "W": "W/{}/{}/{}".format(self.portal_id, t, inst),
             }
         payload = {"portalId": self.portal_id, "deviceInstance": deviceInstance, "topicPath": topicPath}
-        self._mqtt.publish("device/{}/DBus".format(client_id), json.dumps(payload))
+        self._mqtt.publish("{}/{}/DBus".format(self.ns, client_id), json.dumps(payload))
         self._flush()
         logging.info("[reg] replied device/%s/DBus %s", client_id, deviceInstance)
 
@@ -234,9 +240,9 @@ class V2LogicDaemon:
         logging.info("[host] down")
 
     def _publish_cookie(self, cookie):
-        self._mqtt.publish(COOKIE_TOPIC, cookie, retain=True)
+        self._mqtt.publish(self.cookie_topic, cookie, retain=True)
         self._flush()
-        logging.info("[host] published %s = %s (retained)", COOKIE_TOPIC, cookie[:8])
+        logging.info("[host] published %s = %s (retained)", self.cookie_topic, cookie[:8])
 
     def _lookup_portal(self):
         return self.portal_id
@@ -252,6 +258,7 @@ def main():
     ap.add_argument("--ca-cert", default=None)
     ap.add_argument("--mqtt-user", default=None)
     ap.add_argument("--mqtt-pass", default=None)
+    ap.add_argument("--ns", default="device", help="registration namespace (default device; use e.g. hstest to isolate a GX test)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
@@ -270,7 +277,7 @@ def main():
     logging.info("[logicd] portalId=%s broker=%s:%d", portal, args.mqtt_host, args.mqtt_port)
 
     daemon = V2LogicDaemon(bus, args.services, portal, args.mqtt_host, args.mqtt_port,
-                           ca_cert=args.ca_cert, user=args.mqtt_user, passwd=args.mqtt_pass)
+                           ca_cert=args.ca_cert, user=args.mqtt_user, passwd=args.mqtt_pass, ns=args.ns)
 
     loop = GLib.MainLoop()
     signal.signal(signal.SIGINT, lambda *_: loop.quit())
