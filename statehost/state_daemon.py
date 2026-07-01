@@ -16,6 +16,7 @@ Control interface: bus name `com.hypnos.dbusstate`, object `/`, iface `com.hypno
 
 import os
 import sys
+import time
 import json
 import uuid
 import signal
@@ -127,7 +128,7 @@ class HostedService:
         self.type = spec["type"]                        # e.g. vebus
         self.instance = int(spec["instance"])
         self.name = "com.victronenergy.%s.%s" % (self.type, self.service_id)
-        self.paths = spec.get("paths", {}) or {}        # path -> meta (format/writeable/min/max/persist)
+        self.paths = {}                                 # path -> meta; filled by add_path()
         self.meta = spec.get("meta") or {}              # opaque logic-daemon metadata (e.g. lwt), durable
         self._on_gx_write = on_gx_write
         self.connected = True
@@ -158,30 +159,40 @@ class HostedService:
 
         # Device paths from the SHAPE; value = board-authored init, or None if the board
         # omitted it (ownership, not a guess -- e.g. genset /Start).
-        for path, meta in self.paths.items():
-            dpath = _abspath(path)
-            meta = meta or {}
-            writeable = bool(meta.get("writeable", False))
-            svc.add_path(
-                dpath,
-                value=init.get(dpath, None),
-                description=meta.get("description", ""),
-                writeable=writeable,
-                onchangecallback=self._gx_write if writeable else None,
-                gettextcallback=_make_gettext(meta.get("format")),
-            )
+        for path, meta in (spec.get("paths") or {}).items():
+            self.add_path(path, meta, value=init.get(_abspath(path)))
 
         svc.register()
         logging.info("hosting %s (instance %d, %d paths)", self.name, self.instance, len(self.paths))
 
+    def add_path(self, path, meta, value=None):
+        """Register ONE dbus path. Used at creation and for blipless additive shape evolution
+        -- adding a path to an already-registered VeDbusService emits ItemsChanged, never a
+        name drop, and a path that didn't exist has no live state to stomp."""
+        dpath = _abspath(path)
+        meta = meta or {}
+        writeable = bool(meta.get("writeable", False))
+        self.svc.add_path(
+            dpath,
+            value=value,
+            description=meta.get("description", ""),
+            writeable=writeable,
+            onchangecallback=self._gx_write if writeable else None,
+            gettextcallback=_make_gettext(meta.get("format")),
+        )
+        self.paths[path] = meta
+
     def _gx_write(self, path, newvalue):
-        # The GX wrote a writeable path. Accept it and notify the logic daemon. For our
-        # control paths this is informational (board reads commands via N/), but the
-        # channel exists for settings-persist / future write-forwarding.
-        try:
-            self._on_gx_write(self.service_id, path, _native(newvalue))
-        except Exception:
-            logging.exception("on_gx_write failed for %s %s", self.name, path)
+        # A dbus write landed on a writeable path -- ACCEPT it (return True) either way. But
+        # only EMIT the GxWrite signal for GX-OWNED command paths (/Mode, /Start): every
+        # flashmq W/ telemetry sample also lands here, and signalling each one is pointless
+        # bus traffic (JSON-encode + broadcast) that nobody consumes.
+        meta = self.paths.get(path) or self.paths.get(path.lstrip("/")) or {}
+        if meta.get("gx_owned"):
+            try:
+                self._on_gx_write(self.service_id, path, _native(newvalue))
+            except Exception:
+                logging.exception("on_gx_write failed for %s %s", self.name, path)
         return True  # accept the change
 
     def set_values(self, values):
@@ -196,10 +207,13 @@ class HostedService:
         self.connected = bool(connected)
         self.svc["/Connected"] = 1 if connected else 0
         if not connected:
-            # Invalidate live (non-setting) device paths so a stale value can't keep
-            # counting on the GX (the stuck-meter fix), settings/persist untouched.
+            # Invalidate live telemetry paths so a stale value can't keep counting on the GX
+            # (the stuck-meter fix). Left untouched: persist/setting paths, AND GX-owned
+            # command paths (/Mode, /Start) -- those carry standing GX intent, not board
+            # telemetry, so nulling them would erase a scheduler command on every board flap.
             for path, meta in self.paths.items():
-                if (meta or {}).get("persist") or (meta or {}).get("setting"):
+                m = meta or {}
+                if m.get("persist") or m.get("setting") or m.get("gx_owned"):
                     continue
                 dpath = _abspath(path)
                 if dpath in self.svc:
@@ -224,6 +238,7 @@ class HostedService:
         # Force immediate deregister of the service + all object paths (releases the
         # bus name -> the GX sees the device disappear), then drop the private connection.
         self.svc.__del__()
+        self.svc = None  # avoid a second __del__ at GC (double-deregister)
         try:
             self.conn.close()
         except Exception:
@@ -254,9 +269,17 @@ class StateHost(dbus.service.Object):
         spec = json.loads(spec_json)
         sid = spec["service_id"]
         if sid in self.services:
-            # Idempotent adopt: existing service is already correct -> DO NOT re-apply
-            # init (that would stomp live state / fight a command). Reconcile is a no-op.
+            # Idempotent adopt: existing service is already correct -> DO NOT re-apply init
+            # (that would stomp live state / fight a command). But DO create any newly-declared
+            # path: additive shape evolution (firmware starts reporting a new path) is blipless,
+            # so the durable daemon no longer has to be restarted to ship a board feature.
+            # Removals + metadata changes on existing paths stay restart-only.
             hs = self.services[sid]
+            init = {_abspath(k): v for k, v in (spec.get("init") or {}).items()}
+            for path, meta in (spec.get("paths") or {}).items():
+                if path not in hs.paths and _abspath(path) not in hs.svc:
+                    hs.add_path(path, meta, value=init.get(_abspath(path)))
+                    logging.info("adopt %s: added new path %s", hs.name, path)
             return json.dumps({"instance": hs.instance, "created": False})
         # The state daemon owns instance allocation (stable identity across a logic
         # restart, and -- on the GX -- across its own restart via localsettings).
@@ -342,9 +365,24 @@ def main():
     control_bus = make_bus(private=False)  # control endpoint; shared connection is fine
 
     # Pick the instance allocator: localsettings on the GX, in-memory on the bench.
+    # On the GX (--system) DeviceInstance MUST come from localsettings for VRM identity
+    # stability (doc section 6.4). daemontools gives no boot ordering, so localsettings may
+    # not have claimed its name yet when we start -- BLOCK for it rather than silently falling
+    # back to MemoryAllocator, which would hand out unstable instances on the real GX (a new
+    # "device" in VRM on every boot that loses the race).
+    if args.system and not control_bus.name_has_owner("com.victronenergy.settings"):
+        for _ in range(600):  # ~60s; localsettings is an early GX service
+            time.sleep(0.1)
+            if control_bus.name_has_owner("com.victronenergy.settings"):
+                break
+            logging.info("waiting for com.victronenergy.settings (localsettings) ...")
     if control_bus.name_has_owner("com.victronenergy.settings"):
         allocator = LocalSettingsAllocator(control_bus)
         logging.info("instance allocator: localsettings")
+    elif args.system:
+        logging.error("com.victronenergy.settings never appeared; refusing to run with "
+                      "unstable in-memory instances on the GX")
+        sys.exit(1)
     else:
         allocator = MemoryAllocator()
         logging.info("instance allocator: in-memory (no com.victronenergy.settings)")

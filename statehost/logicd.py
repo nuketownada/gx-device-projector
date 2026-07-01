@@ -36,16 +36,26 @@ from projection import ProjectionClient
 
 COOKIE_TOPIC = "device/_host/cookie"
 
+# Grace before a will / connected:0 actually marks a board disconnected. rust-mqtt 0.3 has no
+# MQTT5 Will Delay and its clean session fires the non-retained connected:0 will on EVERY
+# ungraceful drop -- including the board's own 8s registration-timeout retry while logicd is
+# slow/redeploying. Must exceed the board's TCP-retry (3s) + reg-timeout (8s) so a single
+# reconnect cycle can't trip it. See _disconnect.
+DISCONNECT_GRACE_S = 15
+
 
 class V2LogicDaemon:
     def __init__(self, bus, services_yml, portal_id,
-                 mqtt_host, mqtt_port, ca_cert=None, user=None, passwd=None, ns="device"):
+                 mqtt_host, mqtt_port, ca_cert=None, user=None, passwd=None, ns="device",
+                 disconnect_grace=DISCONNECT_GRACE_S):
         self.bus = bus
         self.portal_id = portal_id
         self.shapes = self._load_shapes(services_yml)   # type -> {abspath: meta}
         self.proj = ProjectionClient(bus)
         self.last_cookie = None
         self._lwt = {}                                  # lwt_topic -> (client_id, lwt_value)
+        self._pending_disc = {}                         # client_id -> GLib timer id (debounce)
+        self._disc_grace = disconnect_grace
         # Registration namespace. Default "device" = production. A distinct ns (e.g.
         # "hstest") isolates a GX integration test from the running freakent, which only
         # listens on device/+/Status.
@@ -88,6 +98,11 @@ class V2LogicDaemon:
                     "format": meta.get("format"),
                     "persist": bool(meta.get("persist", False)),
                     "setting": bool(meta.get("setting", False)),
+                    # GX-OWNED command path (/Mode, /Start): the GX authors its value, not the
+                    # board. Drives two things in the state daemon -- forward its onchange (a GX
+                    # write is a command) and EXEMPT it from disconnect-invalidation (its value
+                    # is standing GX intent, not board telemetry to expire on a flap).
+                    "gx_owned": bool(meta.get("gx_owned", False)),
                     "description": meta.get("description", ""),
                 }
                 if meta.get("default") is not None:
@@ -197,6 +212,9 @@ class V2LogicDaemon:
         self._flush()
 
     def _register(self, client_id, status):
+        # A (re)announce proves the board is alive -> cancel any armed disconnect (§1 debounce)
+        # so a flap that re-announced within the grace window is literally zero dbus change.
+        self._cancel_pending_disc(client_id)
         version = status.get("version", "")
         lwt_topic = status.get("lwt_topic")
         lwt_value = str(status.get("lwt_value", "0"))
@@ -234,16 +252,30 @@ class V2LogicDaemon:
             prev = self.proj.get_service(service_id)
             online = bool(prev and prev.get("connected"))
             res = self.proj.ensure(spec)  # the state daemon owns instance allocation
-            # A registration means the client is connected.
-            self.proj.set_connected(service_id, True)
             # Re-apply the board's declared init UNLESS the device was already online (a
             # redundant re-announce -> don't stomp live values). A reconnect leaves the
             # device Connected=0 with its live values invalidated by the LWT, and
             # EnsureService ADOPTS an existing device without re-applying init -- so a v2
             # board (whose identity/capability values live only in init, not W/) would come
-            # back blank. Re-applying restores it. Safe: init holds no GX-commanded path.
+            # back blank. Re-applying restores it.
+            #
+            # ORDER: apply init BEFORE flipping Connected=1. If Connected goes high first,
+            # the GX briefly sees a connected device whose LWT-invalidated paths are still
+            # None -- e.g. a running genset reads StatusCode=None as a not-running edge (the
+            # exact section-1.1 hazard, self-inflicted at reconnect).
+            #
+            # Safe because v2 boards deliberately keep GX-command paths OUT of init. The
+            # inverter authors *actual* status in /State (continuous telemetry) and leaves
+            # /Mode -- the Victron switch-position/control input -- out of init entirely
+            # (invbus seeds it ONCE from hardware after the first status, then honours GX
+            # writes); the genset omits /Start. So init carries only board-owned identity +
+            # telemetry and can never stomp a GX command. (The bench stub + doc historically
+            # put /Mode in the vebus init, which is what mis-suggests a race -- fix those, not
+            # this: /Mode is desired-value-owned-by-GX, /State is actual-owned-by-board.)
             if init and not online:
                 self.proj.set_values(service_id, init)
+            # A registration means the client is connected -- flip this LAST (see ORDER above).
+            self.proj.set_connected(service_id, True)
             ensured[tag] = {"type": typ, "instance": res["instance"]}
             logging.info("[reg] %s -> instance %d (%s%s)", service_id, res["instance"],
                          "created" if res["created"] else "adopted",
@@ -272,16 +304,40 @@ class V2LogicDaemon:
         logging.info("[reg] replied device/%s/DBus %s", client_id, deviceInstance)
 
     def _service_ids_for(self, client_id):
-        prefix = "mqtt_{}_".format(client_id)
+        # Match on the durable, EXACT meta client_id -- not a service_id string prefix, which
+        # would also match a client named e.g. "foo_extra" when disconnecting "foo".
         return [s["service_id"] for s in self.proj.list_services()
-                if s["service_id"].startswith(prefix)]
+                if (s.get("meta") or {}).get("client_id") == client_id]
 
     def _disconnect(self, client_id):
+        # DEBOUNCE, don't act immediately. A board's connected:0 will fires on every ungraceful
+        # rust-mqtt drop (see DISCONNECT_GRACE_S) -- acting at once would invalidate a live
+        # board's values on a transient flap (StatusCode 8->None -> patroclus handoff-off,
+        # systemcalc drops the device), relocating the section-1.1 blip from rare operator
+        # restarts to frequent board reconnects. Arm a grace timer instead; a re-announce
+        # cancels it, a genuine death commits after the window. NB this debounces logicd's OWN
+        # action, not a Victron internal -- legitimate under the design doctrine.
+        if client_id in self._pending_disc:
+            return  # already armed
+        self._pending_disc[client_id] = GLib.timeout_add_seconds(
+            self._disc_grace, self._disconnect_commit, client_id)
+        logging.info("[reg] %s will/disc -> armed %ds grace", client_id, self._disc_grace)
+
+    def _disconnect_commit(self, client_id):
+        self._pending_disc.pop(client_id, None)
         for sid in self._service_ids_for(client_id):
             self.proj.set_connected(sid, False)
-            logging.info("[reg] %s -> Connected=0", sid)
+            logging.info("[reg] %s -> Connected=0 (grace elapsed)", sid)
+        return False  # one-shot timer
+
+    def _cancel_pending_disc(self, client_id):
+        t = self._pending_disc.pop(client_id, None)
+        if t is not None:
+            GLib.source_remove(t)
+            logging.info("[reg] %s alive -> cancelled pending disconnect", client_id)
 
     def _remove(self, client_id):
+        self._cancel_pending_disc(client_id)  # explicit removal supersedes any pending disc
         for sid in self._service_ids_for(client_id):
             self.proj.remove(sid)
             logging.info("[reg] removed %s", sid)
@@ -326,6 +382,8 @@ def main():
     ap.add_argument("--mqtt-user", default=None)
     ap.add_argument("--mqtt-pass", default=None)
     ap.add_argument("--ns", default="device", help="registration namespace (default device; use e.g. hstest to isolate a GX test)")
+    ap.add_argument("--disconnect-grace", type=int, default=DISCONNECT_GRACE_S,
+                    help="seconds a will/connected:0 is debounced before marking a board disconnected (bench uses a short value)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
@@ -344,7 +402,8 @@ def main():
     logging.info("[logicd] portalId=%s broker=%s:%d", portal, args.mqtt_host, args.mqtt_port)
 
     daemon = V2LogicDaemon(bus, args.services, portal, args.mqtt_host, args.mqtt_port,
-                           ca_cert=args.ca_cert, user=args.mqtt_user, passwd=args.mqtt_pass, ns=args.ns)
+                           ca_cert=args.ca_cert, user=args.mqtt_user, passwd=args.mqtt_pass, ns=args.ns,
+                           disconnect_grace=args.disconnect_grace)
 
     loop = GLib.MainLoop()
     signal.signal(signal.SIGINT, lambda *_: loop.quit())

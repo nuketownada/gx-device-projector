@@ -422,6 +422,7 @@ vebus:
     default: 4
     min: 1
     max: 4
+    gx_owned: true   # GX owns this value (switch position); board seeds once from actual, then honors GX writes
   ModeIsAdjustable:
     description: "0. Switch position cannot be controlled remotely (typically because a VE.Bus BMS is present). 1. Switch position can be controlled remotely"
     min: 0
@@ -602,6 +603,7 @@ genset:
   Start:
     description: "WRITTEN BY THE GX: 1=start 0=stop; hypnos reads via N/.../genset/<inst>/Start"
     default: 0
+    gx_owned: true   # GX scheduler owns this; board omits it from init and never invalidates it
   StatusCode:
     description: "0=Standby 1-7=Startup 8=Running 9=Stopping 10=Error (genset.py: 1..9 => running)"
     default: 0
