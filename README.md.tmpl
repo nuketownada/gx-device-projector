@@ -1,8 +1,12 @@
-# dbus-mqtt-devices $VERSION
+# dbus-mqtt-devices $VERSION — transparent-projection fork
 
-## If you have upgraded to Venus OS 3.60, please upgrade to dbus-mqtt-devices V0.9.0 or above asap! ##
+> ⚠️ **Hard fork** of [freakent/dbus-mqtt-devices](https://github.com/freakent/dbus-mqtt-devices), **diverged** from upstream. It keeps the MQTT self-registration idea but re-architects the driver as a **transparent state projector**: the edge device authors its own state and the driver projects it onto the dbus *without authoring anything itself* — no default values, no persisted values, no debounce. Full design in **[docs/transparent-projection.md](docs/transparent-projection.md)**.
+>
+> **Why:** a GX is a reactive control system that acts on dbus *edges*. Upstream seeds default/persisted values on (re)start, so a driver restart or a stale value can fire a phantom edge that systemcalc / dbus-generator act on — real collateral, not cosmetic. Here, projected state has the lifetime of the board's connection and only the board authors it.
+>
+> **Shape** (see [`statehost/`](statehost/)): a **durable state daemon** owns the dbus services — they survive a logic redeploy with zero blip — and a **restartable logic daemon** bridges MQTT ⇄ the state daemon. Registration is **non-retained with board-authored `init`**, plus a **state cookie** so boards re-announce if the durable state is ever lost. v1 (retained) clients keep working through migration ([§8](docs/transparent-projection.md#8-migration--sequencing)).
 
-This VenusOS Driver for GX devices works in concert with the [Victron dbus-mqtt gateway](https://github.com/victronenergy/dbus-mqtt), now known as dbus-flashmq. It has been designed to allow Wi-Fi enabled edge devices (such as ESP32, some Arduino microcontrollers or Raspberry Pis) to self register to the dbus over MQTT. This avoids the need for additional dedicated custom drivers to be developed and deployed.
+This VenusOS driver works with the Victron [dbus-flashmq](https://github.com/victronenergy/dbus-mqtt) gateway to let Wi-Fi edge devices (ESP32, Arduino, Raspberry Pi) self-register on the dbus over MQTT — no dedicated per-device driver required.
 
 The following Victron dbus services are currently supported:
 - temperature (com.victronenergy.temperature._device_)
