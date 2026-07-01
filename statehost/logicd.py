@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from projection import ProjectionClient
 
 COOKIE_TOPIC = "device/_host/cookie"
-INSTANCE_BASE = 200  # bench fallback; GX uses the localsettings allocator (TODO)
 
 
 class V2LogicDaemon:
@@ -45,8 +44,8 @@ class V2LogicDaemon:
         self.portal_id = portal_id
         self.shapes = self._load_shapes(services_yml)   # type -> {abspath: meta}
         self.proj = ProjectionClient(bus)
-        self.instance_map = {}                          # service_id -> instance
         self.last_cookie = None
+        self._lwt = {}                                  # lwt_topic -> (client_id, lwt_value)
 
         self.proj.watch_host(self._on_host_up, self._on_host_down)
 
@@ -107,10 +106,12 @@ class V2LogicDaemon:
         logging.info("[mqtt] connected rc=%s", reason_code)
         client.subscribe("device/+/Status")
         self._flush()  # push the SUBSCRIBE out before any board announces
+        # Reconcile now if the host is already up: adopt devices, rebuild LWT subs, and
+        # publish the current cookie. (watch_host handles a host restart while we're up.)
         try:
-            self._publish_cookie(self.proj.get_cookie())
+            self._on_host_up(self.proj.get_cookie())
         except dbus.DBusException:
-            logging.info("[mqtt] state host not up yet; cookie publish deferred to host-up")
+            logging.info("[mqtt] state host not up yet; will reconcile on its appearance")
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -132,9 +133,22 @@ class V2LogicDaemon:
                 self._register(client_id, status)
             elif connected == 0:
                 self._disconnect(client_id)
+        elif msg.topic in self._lwt:
+            client_id, lwt_value = self._lwt[msg.topic]
+            if msg.payload.decode("utf-8", "ignore") == lwt_value:
+                logging.info("[lwt] %s fired -> disconnect %s", msg.topic, client_id)
+                self._disconnect(client_id)
 
     def _register(self, client_id, status):
         version = status.get("version", "")
+        lwt_topic = status.get("lwt_topic")
+        lwt_value = str(status.get("lwt_value", "0"))
+        # Durable per-service meta so LWT survives a logic restart (registrations are
+        # non-retained; reconcile recovers this from the state daemon).
+        meta = {"client_id": client_id}
+        if lwt_topic:
+            meta["lwt_topic"] = lwt_topic
+            meta["lwt_value"] = lwt_value
         ensured = {}
         for tag, sdef in (status.get("services") or {}).items():
             # Lenient: sdef may be "type" (string) or {type, init}. Not v1 dual-support,
@@ -151,16 +165,21 @@ class V2LogicDaemon:
             spec = {
                 "service_id": service_id,
                 "type": typ,
-                "instance": self._instance_for(service_id),
                 "connection": "MQTT:" + client_id,
                 "FirmwareVersion": version,
                 "paths": shape,
                 "init": init,        # board-authored; omitted paths -> None
+                "meta": meta,
             }
-            res = self.proj.ensure(spec)
+            res = self.proj.ensure(spec)  # the state daemon owns instance allocation
             ensured[tag] = {"type": typ, "instance": res["instance"]}
             logging.info("[reg] %s -> instance %d (%s)", service_id, res["instance"],
                          "created" if res["created"] else "adopted")
+        # Subscribe the device's LWT so an ungraceful drop marks it disconnected.
+        if lwt_topic:
+            self._lwt[lwt_topic] = (client_id, lwt_value)
+            self._mqtt.subscribe(lwt_topic)
+            self._flush()
         if ensured:
             self._reply(client_id, ensured)
 
@@ -192,25 +211,22 @@ class V2LogicDaemon:
     def _remove(self, client_id):
         for sid in self._service_ids_for(client_id):
             self.proj.remove(sid)
-            self.instance_map.pop(sid, None)
             logging.info("[reg] removed %s", sid)
-
-    def _instance_for(self, service_id):
-        if service_id in self.instance_map:
-            return self.instance_map[service_id]
-        used = set(self.instance_map.values())
-        inst = INSTANCE_BASE
-        while inst in used:
-            inst += 1
-        self.instance_map[service_id] = inst
-        return inst
 
     # -- host (re)appearance: reconcile + cookie mirror -----------------------
     def _on_host_up(self, cookie):
         adopted = self.proj.reconcile()
-        for sid, d in adopted.items():
-            self.instance_map[sid] = d["instance"]
-        logging.info("[host] up cookie=%s adopted=%d", cookie[:8], len(adopted))
+        # Rebuild LWT subscriptions from durable per-service meta (registrations are
+        # non-retained, so a logic-only restart would otherwise lose LWT monitoring).
+        self._lwt = {}
+        for _sid, d in adopted.items():
+            m = d.get("meta") or {}
+            lt = m.get("lwt_topic")
+            if lt and lt not in self._lwt:
+                self._lwt[lt] = (m.get("client_id"), m.get("lwt_value", "0"))
+                self._mqtt.subscribe(lt)
+        self._flush()
+        logging.info("[host] up cookie=%s adopted=%d lwt=%d", cookie[:8], len(adopted), len(self._lwt))
         self.last_cookie = cookie
         self._publish_cookie(cookie)
 

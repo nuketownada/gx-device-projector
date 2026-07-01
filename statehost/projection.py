@@ -63,7 +63,8 @@ class ProjectionClient:
         its routing table WITHOUT recreating services. Adoption is a no-op on the host,
         so it never blips a hosted name.
         """
-        return {s["service_id"]: {"instance": s["instance"], "type": s["type"]}
+        return {s["service_id"]: {"instance": s["instance"], "type": s["type"],
+                                  "meta": s.get("meta", {})}
                 for s in self.list_services()}
 
     # -- react ----------------------------------------------------------------

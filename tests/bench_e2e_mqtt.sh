@@ -66,11 +66,16 @@ HC2="$(hostcookie)"
 VINV3="$(getsvc mqtt_benchboard_v1)"
 BOARD_AFTER_STATE="$(cat "$BLOG")"
 
+echo "--- LWT (ungraceful board drop -> Connected=0 via will) ---"
+kill -KILL "$BOARD"; BOARD=""
+sleep 1.3   # broker detects the dropped socket, fires the will, logicd sets Connected=0
+VINV4="$(getsvc mqtt_benchboard_v1)"
+
 echo "--- assertions ---"
 $PY - "${NOC}.afterlogic" "${BLOG}.afterreg" "$VINV1" "$VGEN1" "$VINV2" "$VINV3" \
-      "$HC1" "$HC2" "$BOARD_AFTER_LOGIC" "$BOARD_AFTER_STATE" <<'PYEOF'
+      "$HC1" "$HC2" "$BOARD_AFTER_LOGIC" "$BOARD_AFTER_STATE" "$VINV4" <<'PYEOF'
 import sys, json
-noc, blog_reg, vinv1, vgen1, vinv2, vinv3, hc1, hc2, after_logic, after_state = sys.argv[1:11]
+noc, blog_reg, vinv1, vgen1, vinv2, vinv3, hc1, hc2, after_logic, after_state, vinv4 = sys.argv[1:12]
 def jl(s): return [json.loads(l) for l in s.splitlines() if l.strip()]
 def jlf(p): return [json.loads(l) for l in open(p) if l.strip()]
 noc_ev = jlf(noc)
@@ -110,6 +115,11 @@ check(hc2 and hc2!=hc1, "host cookie flipped across state-daemon restart")
 check(any(e["t"]=="cookie_change" for e in as_), "board saw cookie_change")
 check(any(e["t"]=="reannounce" for e in as_), "board re-announced after the flip")
 check(INV3 and INV3["values"].get("/Mode")==3, "device rebuilt with board init (/Mode=3)")
+
+# 4) LWT: ungraceful board drop -> Connected=0 + live values invalidated
+INV4=json.loads(vinv4)
+check(INV4 and INV4.get("connected") is False, "LWT: vebus Connected=0 after ungraceful board drop")
+check(INV4["values"].get("/State") is None, "LWT: live value invalidated (/State -> None)")
 sys.exit(0 if ok else 1)
 PYEOF
 RC=$?; echo "--- e2e rc=$RC ---"; exit $RC

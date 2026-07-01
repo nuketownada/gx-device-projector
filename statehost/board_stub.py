@@ -36,10 +36,14 @@ class BoardStub:
         self.last_cookie = None
         self.dbus_topic = "device/{}/DBus".format(client_id)
         self.status_topic = "device/{}/Status".format(client_id)
+        self.lwt_topic = "device/{}/LWT".format(client_id)
+        self.lwt_value = "offline"
 
         self.m = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="board_" + client_id)
         self.m.on_connect = self._on_connect
         self.m.on_message = self._on_message
+        # Last will: the broker publishes this if we drop ungracefully -> logicd disconnects us.
+        self.m.will_set(self.lwt_topic, self.lwt_value, retain=False)
         self.m.connect(host, port, 60)
         self.m.loop_start()  # background thread is fine -- the stub touches no dbus
 
@@ -53,7 +57,8 @@ class BoardStub:
 
     def _announce(self):
         payload = {"clientId": self.client_id, "connected": 1, "version": "bench-1.0",
-                   "proto": 2, "services": SERVICES}
+                   "proto": 2, "services": SERVICES,
+                   "lwt_topic": self.lwt_topic, "lwt_value": self.lwt_value}
         # NON-RETAINED: the device exists only while we are announcing it.
         self.m.publish(self.status_topic, json.dumps(payload), retain=False)
         self._emit("announce")

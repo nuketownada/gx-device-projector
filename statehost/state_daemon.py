@@ -74,6 +74,51 @@ def _abspath(path):
     return path if path.startswith("/") else "/" + path
 
 
+class MemoryAllocator:
+    """Bench: in-memory DeviceInstance allocation (NOT persisted -> instances can change
+    across a state-daemon restart; the GX uses LocalSettingsAllocator for stability)."""
+
+    def __init__(self, base=200):
+        self._base = base
+        self._map = {}
+
+    def allocate(self, service_id, service_type, requested=None):
+        if service_id in self._map:
+            return self._map[service_id]
+        used = set(self._map.values())
+        inst = requested if (requested is not None and requested not in used) else self._base
+        while inst in used:
+            inst += 1
+        self._map[service_id] = inst
+        return inst
+
+    def release(self, service_id):
+        self._map.pop(service_id, None)
+
+
+class LocalSettingsAllocator:
+    """GX: allocate a stable VRM instance via com.victronenergy.settings (localsettings),
+    keyed by service_id -- exactly like freakent's device_service. The instance persists
+    across a state-daemon restart / GX reboot so the device keeps its VRM identity."""
+
+    def __init__(self, bus):
+        self._bus = bus
+        self._settings = {}  # service_id -> SettingsDevice (kept alive)
+
+    def allocate(self, service_id, service_type, requested=None):
+        from settingsdevice import SettingsDevice
+        sd = SettingsDevice(bus=self._bus, supportedSettings={}, eventCallback=None)
+        path = "/Settings/Devices/{}/ClassAndVrmInstance".format(service_id)
+        r = sd.addSetting(path, "{}:{}".format(service_type, requested or 1), "", "")
+        self._settings[service_id] = sd
+        _cls, _inst = str(r.get_value()).split(":")
+        return int(_inst)
+
+    def release(self, service_id):
+        # Keep the localsettings record so the VRM instance is stable; just drop our ref.
+        self._settings.pop(service_id, None)
+
+
 class HostedService:
     """One projected com.victronenergy.<type>.<service_id> service."""
 
@@ -83,6 +128,7 @@ class HostedService:
         self.instance = int(spec["instance"])
         self.name = "com.victronenergy.%s.%s" % (self.type, self.service_id)
         self.paths = spec.get("paths", {}) or {}        # path -> meta (format/writeable/min/max/persist)
+        self.meta = spec.get("meta") or {}              # opaque logic-daemon metadata (e.g. lwt), durable
         self._on_gx_write = on_gx_write
         self.connected = True
         # Each hosted service owns a PRIVATE dbus connection: object path '/' (the vedbus
@@ -170,6 +216,7 @@ class HostedService:
             "type": self.type,
             "instance": self.instance,
             "connected": self.connected,
+            "meta": self.meta,
             "values": values,
         }
 
@@ -184,9 +231,10 @@ class HostedService:
 
 
 class StateHost(dbus.service.Object):
-    def __init__(self, bus, make_bus):
+    def __init__(self, bus, make_bus, allocator):
         self._bus = bus
         self._make_bus = make_bus  # () -> a fresh private connection for a hosted service
+        self._alloc = allocator
         # In-memory incarnation cookie: new per process, stable for its life -> changes
         # iff this daemon lost its state. The logic daemon mirrors it to MQTT (retained)
         # so boards re-announce on a change. (Nonce, not counter: boards only test
@@ -210,10 +258,10 @@ class StateHost(dbus.service.Object):
             # init (that would stomp live state / fight a command). Reconcile is a no-op.
             hs = self.services[sid]
             return json.dumps({"instance": hs.instance, "created": False})
-        # Milestone 1: instance comes from the spec (logic/localsettings concern). The
-        # localsettings-backed allocator lands with the logic-daemon refactor.
-        if "instance" not in spec:
-            spec["instance"] = int(spec.get("instance_hint", 0))
+        # The state daemon owns instance allocation (stable identity across a logic
+        # restart, and -- on the GX -- across its own restart via localsettings).
+        requested = spec.get("instance", spec.get("instance_hint"))
+        spec["instance"] = self._alloc.allocate(sid, spec["type"], requested)
         hs = HostedService(self._make_bus(), spec, on_gx_write=self._emit_gx_write)
         self.services[sid] = hs
         return json.dumps({"instance": hs.instance, "created": True})
@@ -240,12 +288,13 @@ class StateHost(dbus.service.Object):
         if hs is None:
             return False
         hs.remove()
+        self._alloc.release(service_id)
         return True
 
     @dbus.service.method(CONTROL_IFACE, in_signature="", out_signature="s")
     def ListServices(self):
         return json.dumps([
-            {"service_id": hs.service_id, "type": hs.type, "instance": hs.instance}
+            {"service_id": hs.service_id, "type": hs.type, "instance": hs.instance, "meta": hs.meta}
             for hs in self.services.values()
         ])
 
@@ -291,7 +340,16 @@ def main():
         return dbus.SystemBus(private=private)
 
     control_bus = make_bus(private=False)  # control endpoint; shared connection is fine
-    host = StateHost(control_bus, make_bus)  # keep a ref for the lifetime of the loop
+
+    # Pick the instance allocator: localsettings on the GX, in-memory on the bench.
+    if control_bus.name_has_owner("com.victronenergy.settings"):
+        allocator = LocalSettingsAllocator(control_bus)
+        logging.info("instance allocator: localsettings")
+    else:
+        allocator = MemoryAllocator()
+        logging.info("instance allocator: in-memory (no com.victronenergy.settings)")
+
+    host = StateHost(control_bus, make_bus, allocator)  # keep a ref for the lifetime of the loop
 
     loop = GLib.MainLoop()
     signal.signal(signal.SIGINT, lambda *_: loop.quit())
