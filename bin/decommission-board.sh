@@ -14,6 +14,12 @@
 #   offline/rebooting -- a live board re-asserts online=1 on connect, and clearing Status would
 #   break a v1 client's restart durability.
 #
+# DEVICE-DESTROYING: against a LIVE logicd this is not just litter cleanup. logicd subscribes
+# device/+/Status, and an empty retained Status payload is its "definition removed" signal ->
+# it runs _remove -> the dbus services DISAPPEAR from the GX immediately (RemoveService, not a
+# disconnect). That's the intent here -- decommission -- but run it only when you mean to erase
+# the device, not to quiet a board that's coming back.
+#
 # Usage (run on the GX, or point -h at the broker):
 #   bin/decommission-board.sh <client_id> [broker_host]
 #   e.g.  bin/decommission-board.sh hypnosgen

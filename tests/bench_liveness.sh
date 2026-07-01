@@ -59,9 +59,30 @@ sleep $((GRACE + 2))
 CONN_LATE="$(getconn)"; STATE_LATE="$(getstate)"
 echo "after grace: connected=$CONN_LATE statuscode=$STATE_LATE"
 
+echo "--- SINGLE-WRITER: a bare retained online=1 (no registration) must NOT resurrect the device ---"
+# This pins the rule the design states: online never sets Connected=1 -- that comes exclusively
+# from a processed registration (which applies init FIRST). If online=1 could flip Connected,
+# the GX would see a connected device whose values are still invalidated (the exact ordering
+# hazard the init-before-Connected fix removed), through a topic the board publishes BEFORE its
+# announce. A mutation adding set_connected(True) to the "1" branch passes every other bench;
+# only these assertions catch it.
+mosquitto_pub -p $PORT -r -t device/livebench/online -m 1
+sleep 1.0
+CONN_BARE="$(getconn)"; STATE_BARE="$(getstate)"
+echo "after bare online=1: connected=$CONN_BARE statuscode=$STATE_BARE"
+
+echo "--- recovery: the board itself returns -> registration restores init THEN Connected ---"
+$PY statehost/board_stub.py --mqtt-port $PORT --client-id livebench --log "$BLOG" & BOARD=$!
+sleep 1.5
+CONN_BACK="$(getconn)"; STATE_BACK="$(getstate)"
+echo "after re-announce: connected=$CONN_BACK statuscode=$STATE_BACK"
+
 echo "--- assertions ---"
 RC=0
 [ "$CONN_EARLY" = "True" ] && echo "PASS: adopted the stale Connected=1 on restart (grace not yet elapsed)" || { echo "FAIL: expected Connected=1 right after restart, got $CONN_EARLY"; RC=1; }
 [ "$CONN_LATE" = "False" ] && echo "PASS: retained online=0 committed Connected=0 within grace (hole SHUT)" || { echo "FAIL: dead board stuck Connected=$CONN_LATE -- retained online did not commit"; RC=1; }
 [ "$STATE_LATE" = "None" ] && echo "PASS: live values invalidated on the commit (stuck-meter fix applied)" || { echo "FAIL: StatusCode not invalidated (got $STATE_LATE)"; RC=1; }
+[ "$CONN_BARE" = "False" ] && echo "PASS: single-writer -- bare online=1 did NOT set Connected=1" || { echo "FAIL: online=1 resurrected the device without a registration (Connected=$CONN_BARE)"; RC=1; }
+[ "$STATE_BARE" = "None" ] && echo "PASS: single-writer -- values still invalidated after bare online=1" || { echo "FAIL: values changed on a bare online=1 (StatusCode=$STATE_BARE)"; RC=1; }
+[ "$CONN_BACK" = "True" ] && [ "$STATE_BACK" = "8" ] && echo "PASS: recovery via registration -- init reapplied, then Connected=1" || { echo "FAIL: recovery wrong (connected=$CONN_BACK statuscode=$STATE_BACK)"; RC=1; }
 echo "--- liveness rc=$RC ---"; exit $RC
