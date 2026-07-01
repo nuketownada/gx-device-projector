@@ -143,18 +143,21 @@ class HostedService:
         svc = VeDbusService(self.name, bus=conn, register=False)
         self.svc = svc
 
-        # Driver-identity: synthesized constants describing the PROJECTOR, not device
-        # state -- never stale, so the daemon owns them.
+        # MANDATORY Victron identity paths. Venus consumers treat a service as
+        # DISCONNECTED and skip it (e.g. systemcalc._remove_unconnected_services) unless
+        # /Connected==1 AND /ProductName AND /Mgmt/Connection are all present -- so these
+        # must ALWAYS exist, not be optional. (A missing /ProductName is exactly why the
+        # inverter wasn't eligible as the battery monitor.) Freakent auto-adds these too.
         svc.add_path("/Mgmt/ProcessName", DRIVER_PROCESS)
         svc.add_path("/Mgmt/ProcessVersion", DRIVER_VERSION)
         svc.add_path("/Mgmt/Connection", spec.get("connection", "MQTT"))
         svc.add_path("/DeviceInstance", self.instance)
+        svc.add_path("/DeviceName", spec.get("DeviceName", "%s:%s" % (self.service_id, self.type)))
+        svc.add_path("/ProductName", spec.get("ProductName", "MQTT %s" % self.type))
+        svc.add_path("/FirmwareVersion", spec.get("FirmwareVersion", DRIVER_VERSION))
         svc.add_path("/Connected", 1)
-
-        # Device-identity the board supplied in the spec (optional).
-        for ident in ("ProductName", "ProductId", "FirmwareVersion"):
-            if ident in spec:
-                svc.add_path("/" + ident, spec[ident])
+        if "ProductId" in spec:
+            svc.add_path("/ProductId", spec["ProductId"])
 
         # Device paths from the SHAPE; value = board-authored init, or None if the board
         # omitted it (ownership, not a guess -- e.g. genset /Start).
