@@ -143,21 +143,18 @@ class HostedService:
         svc = VeDbusService(self.name, bus=conn, register=False)
         self.svc = svc
 
-        # MANDATORY Victron identity paths. Venus consumers treat a service as
-        # DISCONNECTED and skip it (e.g. systemcalc._remove_unconnected_services) unless
-        # /Connected==1 AND /ProductName AND /Mgmt/Connection are all present -- so these
-        # must ALWAYS exist, not be optional. (A missing /ProductName is exactly why the
-        # inverter wasn't eligible as the battery monitor.) Freakent auto-adds these too.
+        # PIPE metadata the daemon owns -- these describe the projector/transport, not the
+        # device, and the client can't author them. Everything device-identity (ProductName,
+        # CustomName, FirmwareVersion, ...) is a normal SHAPE path whose value comes from the
+        # client's init (or the services.yml default via the v1 shim) -- the pipe projects it,
+        # never authors it. NB: Venus requires /ProductName + /Mgmt/Connection + /Connected==1
+        # or it treats the service as disconnected (systemcalc._remove_unconnected_services),
+        # so /ProductName MUST be a shape path with a default (see services.yml).
         svc.add_path("/Mgmt/ProcessName", DRIVER_PROCESS)
         svc.add_path("/Mgmt/ProcessVersion", DRIVER_VERSION)
         svc.add_path("/Mgmt/Connection", spec.get("connection", "MQTT"))
         svc.add_path("/DeviceInstance", self.instance)
-        svc.add_path("/DeviceName", spec.get("DeviceName", "%s:%s" % (self.service_id, self.type)))
-        svc.add_path("/ProductName", spec.get("ProductName", "MQTT %s" % self.type))
-        svc.add_path("/FirmwareVersion", spec.get("FirmwareVersion", DRIVER_VERSION))
         svc.add_path("/Connected", 1)
-        if "ProductId" in spec:
-            svc.add_path("/ProductId", spec["ProductId"])
 
         # Device paths from the SHAPE; value = board-authored init, or None if the board
         # omitted it (ownership, not a guess -- e.g. genset /Start).

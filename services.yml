@@ -5,6 +5,9 @@
 
 # https://github.com/victronenergy/venus/wiki/dbus#temperatures
 temperature:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Temperature"
   ProductId:
     default: 41314 # Generic Temperature Input
   CustomName:
@@ -40,6 +43,9 @@ temperature:
 
 # https://github.com/victronenergy/venus/wiki/dbus#tank-levels
 tank:             
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Tank"
   ProductId:
     default: 41313 # Generic Tank Input
   CustomName:
@@ -73,6 +79,9 @@ tank:
 
 # https://github.com/victronenergy/venus/wiki/dbus#pv-inverters
 pvinverter:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT PV Inverter"
   ProductId:
     default: 45069 # 0xB00D, 0xB00D, 45069 = ET340, 45068 = ET112, ESS Demo mode uses 45058
   CustomName:
@@ -166,6 +175,9 @@ pvinverter:
 
 # https://github.com/victronenergy/venus/wiki/dbus#grid-and-genset-meter
 grid:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Grid"
   ProductId:
     default: 65535 # 0xFFFF
   CustomName:
@@ -335,6 +347,9 @@ evcharger:
 
 # https://github.com/victronenergy/venus/wiki/dbus#battery
 battery:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Battery"
   ProductId:
     default: 65535 # 0xFFFF
   CustomName:
@@ -389,6 +404,9 @@ battery:
 
 # https://github.com/victronenergy/venus/wiki/dbus#vebus-systems-multis-quattros-inverters
 vebus:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Multi"
   ProductId:
     default: 9760 # Multiplus 48/3000/35-50
   CustomName:
@@ -570,6 +588,9 @@ vebus:
 # hypnos repo tools/ dir. freakent re-reads this file per registration, so no
 # driver restart is needed.
 genset:
+  ProductName:
+    description: "Product name (client-authored in v2 init; this default is the v1 fallback)"
+    default: "MQTT Genset"
   ProductId:
     default: 65535
   CustomName:
