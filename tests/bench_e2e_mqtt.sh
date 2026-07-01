@@ -102,7 +102,11 @@ def check(c,m):
     print(("PASS" if c else "FAIL")+": "+m)
 
 # 1) registration: device populated from board init, /Start omitted
-check(INV1 and INV1["values"].get("/Mode")==3, "vebus /Mode=3 from board init")
+# /Mode is GX-OWNED, OMITTED from board init (invbus seeds it from actual over W/, a flashmq
+# path the mosquitto bench can't bridge), so it stays None here -- exactly like /Start on the
+# genset. Actual status rides in /State (board-authored). The seed path is the GX integration
+# test's job (it has flashmq).
+check(INV1 and INV1["values"].get("/Mode") is None, "vebus /Mode omitted from init (GX-owned)")
 check(INV1["values"].get("/State")==9, "vebus /State=9 from board init")
 check(GEN1["values"].get("/StatusCode")==8, "genset /StatusCode=8 from board init")
 check(GEN1["values"].get("/Start", "X") is None, "genset /Start invalid (board omitted)")
@@ -125,7 +129,7 @@ check(INV2==INV1, "vebus values unchanged across logic restart")
 check(hc2 and hc2!=hc1, "host cookie flipped across state-daemon restart")
 check(any(e["t"]=="cookie_change" for e in as_), "board saw cookie_change")
 check(any(e["t"]=="reannounce" for e in as_), "board re-announced after the flip")
-check(INV3 and INV3["values"].get("/Mode")==3, "device rebuilt with board init (/Mode=3)")
+check(INV3 and INV3["values"].get("/State")==9, "device rebuilt with board init (/State=9, /Mode still omitted)")
 
 # 4a) LWT FLAP: drop + re-announce within the grace -> debounced, ZERO change
 INV_FLAP=json.loads(vinv_flap)

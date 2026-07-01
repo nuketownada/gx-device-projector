@@ -371,11 +371,11 @@ def main():
     # back to MemoryAllocator, which would hand out unstable instances on the real GX (a new
     # "device" in VRM on every boot that loses the race).
     if args.system and not control_bus.name_has_owner("com.victronenergy.settings"):
+        logging.info("waiting for com.victronenergy.settings (localsettings) to appear ...")
         for _ in range(600):  # ~60s; localsettings is an early GX service
             time.sleep(0.1)
             if control_bus.name_has_owner("com.victronenergy.settings"):
                 break
-            logging.info("waiting for com.victronenergy.settings (localsettings) ...")
     if control_bus.name_has_owner("com.victronenergy.settings"):
         allocator = LocalSettingsAllocator(control_bus)
         logging.info("instance allocator: localsettings")

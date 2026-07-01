@@ -105,7 +105,12 @@ class V2LogicDaemon:
                     "gx_owned": bool(meta.get("gx_owned", False)),
                     "description": meta.get("description", ""),
                 }
-                if meta.get("default") is not None:
+                # v1-shim defaults seed init for legacy (init-less) clients ONLY. Never seed a
+                # GX-owned path (/Mode, /Start) from a services.yml default: that would re-author
+                # the exact GX-owned value the whole invariant removes (a v1 re-registration would
+                # stomp a standing scheduler command with Off/Stop). No v1 vebus/genset client
+                # exists today; excluding gx_owned here removes the trap before one does.
+                if meta.get("default") is not None and not meta.get("gx_owned"):
                     defaults["/" + pk] = meta["default"]
             shapes[typ] = d
             self._v1_defaults[typ] = defaults
@@ -269,9 +274,8 @@ class V2LogicDaemon:
             # /Mode -- the Victron switch-position/control input -- out of init entirely
             # (invbus seeds it ONCE from hardware after the first status, then honours GX
             # writes); the genset omits /Start. So init carries only board-owned identity +
-            # telemetry and can never stomp a GX command. (The bench stub + doc historically
-            # put /Mode in the vebus init, which is what mis-suggests a race -- fix those, not
-            # this: /Mode is desired-value-owned-by-GX, /State is actual-owned-by-board.)
+            # telemetry and can never stomp a GX command. (/Mode is desired-value-owned-by-GX,
+            # /State is actual-owned-by-board -- the stub, benches, and doc §6.3 all model this.)
             if init and not online:
                 self.proj.set_values(service_id, init)
             # A registration means the client is connected -- flip this LAST (see ORDER above).

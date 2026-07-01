@@ -93,7 +93,8 @@ check(bool(c3) and c3!=c1, "cookie FLIPPED across daemon restart (%s -> %s)"%(c1
 
 j1=json.loads(vinv1); j2=json.loads(vinv2)
 check(j1==j2, "vebus values unchanged across logic restart")
-check(j1 and j1["values"].get("/Mode")==3, "vebus /Mode = 3 from board init (got %r)"%(j1 and j1["values"].get("/Mode")))
+check(j1 and j1["values"].get("/State")==9, "vebus /State = 9 from board init (got %r)"%(j1 and j1["values"].get("/State")))
+check(j1 and j1["values"].get("/Mode") is None, "vebus /Mode omitted from init (GX-owned, seeded from actual on the GX) (got %r)"%(j1 and j1["values"].get("/Mode")))
 
 g=json.loads(vgen1)
 check(g["values"].get("/StatusCode")==8, "genset /StatusCode = 8 from board init (got %r)"%g["values"].get("/StatusCode"))
