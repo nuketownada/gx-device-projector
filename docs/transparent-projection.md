@@ -203,7 +203,8 @@ own view match the state daemon's reality. This is what delivers zero-blip on de
 | **Logic deploy/crash** | untouched | unchanged | none | **zero blip** (adopt) |
 | **State-daemon crash** | new, empty | **changes** | re-announce | total loss → rebuilt from board init (§7); accepted |
 | **GX reboot** | new, empty | changes | reconnect→announce | total loss; boards re-announce on MQTT reconnect (cookie redundant) |
-| **Board restart** | untouched | unchanged | LWT → `/Connected=0`; on return, announce | board's own device flaps disconnected/connected; others untouched |
+| **Board restart (fast, < grace)** | untouched | unchanged | will fires → logic arms grace; board boots, re-announces (confirmed init) → cancels | **zero dbus change** — the will is debounced (§5.2) and the re-announce carries a confirmed `StatusCode`, so a running genset never flaps. |
+| **Board restart (slow, > grace)** | untouched | unchanged | will fires; grace elapses → `/Connected=0`; on return, announce | board's own device flaps disconnected/connected; others untouched |
 
 ---
 
