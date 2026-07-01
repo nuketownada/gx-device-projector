@@ -319,6 +319,31 @@ in parallel; it doesn't disturb the running driver until we switch the service o
    (a few seconds of stable not-running before handoff-off) as defense-in-depth — it can't
    protect the GX's internal reactions, but it hardens the chain we own.
 
+### 8.1 Per-board v1→v2 cutover — clear the stale retained `Status`
+
+A v1 board registers with a **retained** `device/<id>/Status` (so a logicd restart rebuilds
+it from the retained value). A v2 board publishes `Status` **non-retained** and re-announces
+on the cookie instead. So when you flash a board v1→v2, its old v1 retained `Status` —
+either the `connected:1` registration or, once the v1 connection has dropped, the
+`connected:0` **will** — **lingers on the broker**. The v2 firmware never overwrites it (it
+publishes non-retained). On the next logicd restart, `_handle` re-reads that stale retained
+`connected:0` and marks the now-v2 board **Connected=0**, stranding it offline until it
+happens to re-announce (tell: a live board with telemetry flowing but Connected=0).
+
+**Do not mitigate this in logicd** by ignoring retained `Status`. v1 clients *depend* on
+retained registration — that's exactly how they survive a logicd/state-daemon restart — so
+ignoring retained `Status` breaks every live v1 client (patroclus, the tanks). The stale
+will is a one-time per-board artifact; clear it as part of the flash:
+
+```sh
+hypnos-ota <ip> <board>              # flash the board to v2 (run from the hypnos repo)
+bin/cutover-board-to-v2.sh <client_id>   # then clear its stale v1 retained Status
+```
+
+`cutover-board-to-v2.sh` just does `mosquitto_pub -r -t device/<id>/Status -m ""` (an empty
+retained payload clears the topic) and verifies it's gone. The v2 board then re-announces
+(non-retained) on connect and registers cleanly, and no future logicd restart can strand it.
+
 ---
 
 ## 9. Bench validation (before venus.local)
