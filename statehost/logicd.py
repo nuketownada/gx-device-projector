@@ -51,6 +51,7 @@ class V2LogicDaemon:
         # listens on device/+/Status.
         self.ns = ns
         self.status_sub = "{}/+/Status".format(ns)
+        self.proxy_sub = "{}/+/Proxy".format(ns)
         self.cookie_topic = "{}/_host/cookie".format(ns)
 
         self.proj.watch_host(self._on_host_up, self._on_host_down)
@@ -62,8 +63,12 @@ class V2LogicDaemon:
             self._mqtt.tls_set(ca_cert, cert_reqs=ssl.CERT_REQUIRED)
         self._mqtt.on_connect = self._on_connect
         self._mqtt.on_message = self._on_message
+        self._mqtt.on_disconnect = self._on_disconnect
+        self._sock_watch = None
         self._mqtt.connect(mqtt_host, mqtt_port, 60)
         self._init_socket()
+        # loop_misc/writes on a 1s tick (added once; survives reconnects).
+        self._sock_timer = GLib.timeout_add_seconds(1, self._on_sock_timer)
 
     # -- services.yml = SHAPE only (no value defaults in the v2 model) ---------
     def _load_shapes(self, path):
@@ -93,8 +98,29 @@ class V2LogicDaemon:
 
     # -- MQTT via the GLib mainloop (single-threaded, like MqttGObjectBridge) --
     def _init_socket(self):
+        # (Re)watch the MQTT socket for reads; the fd changes on every reconnect.
+        if self._sock_watch:
+            GLib.source_remove(self._sock_watch)
         self._sock_watch = GLib.io_add_watch(self._mqtt.socket().fileno(), GLib.IO_IN, self._on_sock_in)
-        self._sock_timer = GLib.timeout_add_seconds(1, self._on_sock_timer)
+
+    def _on_disconnect(self, client, userdata, *args):
+        # Broker restart / GX reboot: drop the (now-dead) socket watch and reconnect. The
+        # state daemon keeps hosting the devices; on reconnect on_connect reconciles + re-subs.
+        logging.warning("[mqtt] disconnected; scheduling reconnect")
+        if self._sock_watch:
+            GLib.source_remove(self._sock_watch)
+            self._sock_watch = None
+        GLib.timeout_add_seconds(3, self._reconnect)
+
+    def _reconnect(self):
+        try:
+            self._mqtt.reconnect()
+            self._init_socket()
+            logging.info("[mqtt] reconnected")
+            return False  # stop the retry timer
+        except Exception as e:
+            logging.warning("[mqtt] reconnect failed (%s); retry in 3s", e)
+            return True   # keep retrying
 
     def _flush(self):
         # Send any queued packets NOW (don't wait for the 1s misc timer) -- otherwise a
@@ -116,7 +142,8 @@ class V2LogicDaemon:
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         logging.info("[mqtt] connected rc=%s", reason_code)
         client.subscribe(self.status_sub)
-        self._flush()  # push the SUBSCRIBE out before any board announces
+        client.subscribe(self.proxy_sub)  # value-relay clients (patroclus, tanks)
+        self._flush()  # push the SUBSCRIBEs out before any board announces
         # Reconcile now if the host is already up: adopt devices, rebuild LWT subs, and
         # publish the current cookie. (watch_host handles a host restart while we're up.)
         try:
@@ -144,11 +171,30 @@ class V2LogicDaemon:
                 self._register(client_id, status)
             elif connected == 0:
                 self._disconnect(client_id)
+        elif len(parts) == 3 and parts[0] == self.ns and parts[2] == "Proxy":
+            self._handle_proxy(msg.payload)
         elif msg.topic in self._lwt:
             client_id, lwt_value = self._lwt[msg.topic]
             if msg.payload.decode("utf-8", "ignore") == lwt_value:
                 logging.info("[lwt] %s fired -> disconnect %s", msg.topic, client_id)
                 self._disconnect(client_id)
+
+    def _handle_proxy(self, payload):
+        # freakent's device/<id>/Proxy value relay (ported from device_proxy.py): a client
+        # batches values as {topicPath:"W/<portal>/<svc>/<inst>", values:{Key:val,...}};
+        # fan them out to individual W/ writes (-> flashmq -> the state daemon's dbus paths).
+        # patroclus + the tanks publish this way; the hypnos boards write W/ directly.
+        try:
+            msg = json.loads(payload)
+        except Exception:
+            return
+        tp = msg.get("topicPath")
+        values = msg.get("values")
+        if not tp or not isinstance(values, dict):
+            return
+        for k, v in values.items():
+            self._mqtt.publish(tp + "/" + k, json.dumps({"value": v}))
+        self._flush()
 
     def _register(self, client_id, status):
         version = status.get("version", "")
