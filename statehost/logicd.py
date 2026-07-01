@@ -231,10 +231,23 @@ class V2LogicDaemon:
                 "init": init,        # board-authored; omitted paths -> None
                 "meta": meta,
             }
+            prev = self.proj.get_service(service_id)
+            online = bool(prev and prev.get("connected"))
             res = self.proj.ensure(spec)  # the state daemon owns instance allocation
+            # A registration means the client is connected.
+            self.proj.set_connected(service_id, True)
+            # Re-apply the board's declared init UNLESS the device was already online (a
+            # redundant re-announce -> don't stomp live values). A reconnect leaves the
+            # device Connected=0 with its live values invalidated by the LWT, and
+            # EnsureService ADOPTS an existing device without re-applying init -- so a v2
+            # board (whose identity/capability values live only in init, not W/) would come
+            # back blank. Re-applying restores it. Safe: init holds no GX-commanded path.
+            if init and not online:
+                self.proj.set_values(service_id, init)
             ensured[tag] = {"type": typ, "instance": res["instance"]}
-            logging.info("[reg] %s -> instance %d (%s)", service_id, res["instance"],
-                         "created" if res["created"] else "adopted")
+            logging.info("[reg] %s -> instance %d (%s%s)", service_id, res["instance"],
+                         "created" if res["created"] else "adopted",
+                         "" if online else "; init applied")
         # Subscribe the device's LWT so an ungraceful drop marks it disconnected.
         if lwt_topic:
             self._lwt[lwt_topic] = (client_id, lwt_value)
