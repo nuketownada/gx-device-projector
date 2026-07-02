@@ -15,6 +15,18 @@
 #   registration to survive a restart, so that breaks every live v1 client. It's a one-time
 #   per-board artifact: clear the board's retained Status topic after flashing it to v2.
 #
+# ORDERING (learned the hard way on patroclus01): the clearing publish below is delivered
+# LIVE to logicd as an empty device/<id>/Status -- which is exactly the v1 "definition
+# removed" deregistration signal, so logicd immediately REMOVES the board's dbus services.
+# A v2 board doesn't notice (nothing prompts it to re-announce), so it keeps publishing
+# Proxy into the void until its next reconnect. Therefore, after running this script you
+# MUST bounce the board (power-cycle, OTA re-upload, or drop its MQTT connection) so it
+# reconnects and re-registers. Full per-board sequence:
+#   1. flash the board to v2 firmware
+#   2. wait for its v2 registration in logicd.log
+#   3. run this script (clears the stale v1 retained Status; logicd removes the devices)
+#   4. bounce the board -> fresh connect re-registers, devices re-created with init applied
+#
 # Usage (run on the GX, or point -h at the broker):
 #   bin/cutover-board-to-v2.sh <client_id> [broker_host]
 #   e.g.  bin/cutover-board-to-v2.sh hypnosinv
@@ -47,3 +59,20 @@ if [ -n "$LEFT" ]; then
   exit 1
 fi
 echo "OK: ${TOPIC} cleared -- the v2 board will re-announce (non-retained) on connect."
+
+# If logicd is live it just deregistered the board (empty Status == v1 definition removal).
+# When running locally on the GX, show whether the dbus services are gone so the operator
+# knows a bounce is required.
+if [ "$HOST" = "127.0.0.1" ] && command -v dbus >/dev/null 2>&1; then
+  LIVE=$(dbus -y 2>/dev/null | grep -c "mqtt_${CID}_" || true)
+  if [ "$LIVE" -eq 0 ]; then
+    echo "NOTE: no com.victronenergy.*.mqtt_${CID}_* services on dbus -- logicd deregistered"
+    echo "      the board on the clear (expected). BOUNCE THE BOARD NOW so it re-registers."
+  else
+    echo "NOTE: ${LIVE} mqtt_${CID}_* service(s) still on dbus. If the board was online when"
+    echo "      you ran this, logicd may remove them momentarily -- bounce the board anyway."
+  fi
+else
+  echo "NOTE: if the board was online during the clear, logicd deregistered it -- bounce the"
+  echo "      board so it reconnects and re-registers."
+fi
