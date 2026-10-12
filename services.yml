@@ -199,6 +199,10 @@ grid:
   Ac/Power: # Total power of all phases, preferably real power
     description: "W"
     format: "{} W"
+  Ac/PowerFactor: # Total PF over all phases; shape only -- patroclus authors the
+                  # per-phase paths but no total, so this projects as None today.
+    description: "unitless, -1..1"
+    format: "{}"
   Ac/Current: # Deprecated
     description: "A AC"
     format: "{} A"
@@ -214,6 +218,9 @@ grid:
   Ac/L1/Power:
     description: "W"
     format: "{} W"
+  Ac/L1/PowerFactor:
+    description: "unitless, -1..1"
+    format: "{}"
   Ac/L1/Voltage:
     description: "V AC"
     format: "{} V"
@@ -229,6 +236,9 @@ grid:
   Ac/L2/Power:
     description: "W"
     format: "{} W"
+  Ac/L2/PowerFactor:
+    description: "unitless, -1..1"
+    format: "{}"
   Ac/L2/Voltage:
     description: "V AC"
     format: "{} V"
@@ -244,6 +254,9 @@ grid:
   Ac/L3/Power:
     description: "W"
     format: "{} W"
+  Ac/L3/PowerFactor:
+    description: "unitless, -1..1"
+    format: "{}"
   Ac/L3/Voltage:
     description: "V AC"
     format: "{} V"
