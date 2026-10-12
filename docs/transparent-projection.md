@@ -1,6 +1,8 @@
 # Transparent Projection — dbus state daemon + board-authored state
 
-**Status:** design draft (2026-06-30). Not yet implemented.
+**Status:** implemented and deployed. Written as a design draft (2026-06-30); cut over on
+the Ekrano 2026-07-01 (`dbus-state-host` + `dbus-logicd`). Sections added after that date
+carry field findings from the live system — see §4.3.
 **Authors:** Ada, Joshua Perry.
 **Scope:** restructure dbus-mqtt-devices (freakent) so it never authors device
 state — it only *projects* state authored by the MQTT client. Companion firmware
@@ -160,6 +162,67 @@ Notes:
 - **Crash/restart:** all hosted `com.victronenergy.*` names drop → GX sees devices vanish
   → accepted total loss (§5.3). New process → new cookie.
 
+### 4.3 Additive shape evolution — and the flashmq re-enumerate it needs
+
+`EnsureService` on an already-hosted service adopts it and `add_path()`s any path the
+declared shape has gained (`state_daemon.py`). Adding a path to a registered
+`VeDbusService` emits `ItemsChanged`, never a name drop, and a path that did not exist
+has no live state to stomp — so growing a shape is **blipless on dbus**: no re-instancing,
+no `/Connected` flap, no GX "device disappeared".
+
+**That covers the dbus surface only.** FlashMQ enumerates a service's writable path set
+when the service *registers with it*, and never routes `W/` writes to paths added after
+that — even though its ACL lookup *does* resolve them. So a new value path goes quiet
+rather than erroring, which is the confusing part.
+
+**Detection signature.** The `flashmq_plugin_acl_check` "Can't find item for `<path>`"
+errors stop (the path now resolves), but `GetValue` keeps returning `[]` (invalid) while
+`W/…/<path>` traffic is plainly visible on the topic. One-line discriminator: write the
+path directly over dbus —
+
+```sh
+dbus -y com.victronenergy.<type>.<service_id> /Some/Path SetValue %0.95   # lands => dbus fine
+```
+
+If that sticks and the MQTT writes don't, dbus is healthy and FlashMQ's routing is stale.
+
+**What needs a re-enumerate:**
+
+| Shape change | Re-enumerate? | Why |
+|---|---|---|
+| New path whose values arrive over `W/` (Proxy relay, or a board writing `W/` directly) | **Yes** | Path exists, ACL passes, values never land |
+| New path written by the logic daemon (`SetValue`/`SetValues`) | No | Control interface goes straight to the state daemon over dbus — FlashMQ is not in the path |
+| New **GX-owned** command path (`/Mode`, `/Start`) | No | The GX writes it over dbus (systemcalc / dbus-generator), not over MQTT |
+| New shape-only path nobody authors | No | Nothing to deliver; it is correctly invalid |
+| New **service** (new board or tag) | No | A fresh `VeDbusService` registers and FlashMQ enumerates it then |
+| Metadata change on an existing path (format, min/max, `writeable`, `gx_owned`) | — | **State-daemon restart only**: adopt skips paths that already exist |
+| Path removal | — | **State-daemon restart only** |
+
+**How to re-enumerate:**
+
+```sh
+svc -t /service/flashmq
+```
+
+This leaves every hosted `com.victronenergy.*` name, instance, and value untouched — it is
+**not** the §5.3 state-daemon row. The cost is MQTT-side: every client disconnects and
+reconnects, so per board it looks like the "Board restart" rows (will fires → logic arms
+grace → board reconnects and re-announces). Strictly cheaper than restarting the state
+daemon, which would blip the dbus names to deliver the same result.
+
+Sequencing a new value path end to end: deploy services.yml → `svc -t /service/dbus-logicd`
+(reloads shapes; state daemon untouched) → bounce the board so it re-registers and the
+adopt path adds the dbus path → `svc -t /service/flashmq` so the writes actually route.
+
+> **Field-found 2026-10-11** adding `Ac/L<n>/PowerFactor` to `grid` for patroclus01. The
+> first three steps landed cleanly (rejects ~3.3/s → 0, instance 5 stable, no blip) and the
+> values still read `[]` while patroclus wrote `{"value": 0}` to them ~3/s; a direct dbus
+> `SetValue` on the same path landed and persisted. FlashMQ was deliberately **not** bounced
+> there, because that meter's PF is undecoded and ships a constant `0` — delivering it would
+> have put a fabricated `0.00` on the GUI and into VRM, the §1.1 hazard. Worth remembering as
+> the general caveat: a re-enumerate makes the data real, so only do it once the data *is*
+> real.
+
 ---
 
 ## 5. Component: logic daemon (reconcile + MQTT)
@@ -206,6 +269,7 @@ own view match the state daemon's reality. This is what delivers zero-blip on de
 | **GX reboot** | new, empty | changes | reconnect→announce | total loss; boards re-announce on MQTT reconnect (cookie redundant) |
 | **Board restart (fast, < grace)** | untouched | unchanged | will fires → logic arms grace; board boots, re-announces (confirmed init) → cancels | **zero dbus change** — the will is debounced (§5.2) and the re-announce carries a confirmed `StatusCode`, so a running genset never flaps. |
 | **Board restart (slow, > grace)** | untouched | unchanged | will fires; grace elapses → `/Connected=0`; on return, announce | board's own device flaps disconnected/connected; others untouched |
+| **FlashMQ restart** (`svc -t /service/flashmq`) | untouched | unchanged | all clients drop + reconnect → re-announce | **zero dbus change** — names, instances and values all survive. Required to pick up `W/`-written paths added since a service registered (§4.3); per board it behaves as a "Board restart" row. |
 
 ---
 

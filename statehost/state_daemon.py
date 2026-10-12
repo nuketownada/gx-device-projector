@@ -168,7 +168,14 @@ class HostedService:
     def add_path(self, path, meta, value=None):
         """Register ONE dbus path. Used at creation and for blipless additive shape evolution
         -- adding a path to an already-registered VeDbusService emits ItemsChanged, never a
-        name drop, and a path that didn't exist has no live state to stomp."""
+        name drop, and a path that didn't exist has no live state to stomp.
+
+        CAVEAT (doc section 4.3): blipless on DBUS only. FlashMQ enumerates a service's
+        writable paths when the service registers with it and never routes W/ writes to paths
+        added later -- its ACL lookup resolves them (so the "Can't find item" errors stop) but
+        the values never land. A path fed by W/ (Proxy relay, or a board writing W/ directly)
+        therefore needs `svc -t /service/flashmq` to go live. Paths written by the logic daemon
+        or by the GX over dbus are unaffected."""
         dpath = _abspath(path)
         meta = meta or {}
         writeable = bool(meta.get("writeable", False))
